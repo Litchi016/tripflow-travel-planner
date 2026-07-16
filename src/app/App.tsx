@@ -1,4 +1,4 @@
-import { useState, useRef } from "react"
+import { useEffect, useState, useRef } from "react"
 import {
   MapPin, Plus, Settings, ChevronLeft, X, MoreHorizontal,
   Landmark, Utensils, Building2, Plane, Circle,
@@ -66,6 +66,101 @@ const INIT_PLACES: Place[] = [
   { id: "p14", name: "北京大兴国际机场", type: "transport",  note: "",           address: "北京市大兴区榆磐路",           dayAssigned: null, order: 0, coords: { x: 198, y: 368 } },
 ]
 const INIT_TRIP: Trip = { id: "t1", name: "北京7日游", destination: "北京", dateMode: "pending", days: 7, startDate: "", places: INIT_PLACES }
+
+const STORAGE_KEY = "tripflow.app-data"
+const STORAGE_VERSION = 1
+
+interface PersistedData {
+  version: 1
+  trips: Trip[]
+  trashedTrips: TrashedTrip[]
+  curTripId: string
+}
+
+const cloneTrip = (trip: Trip): Trip => ({
+  ...trip,
+  places: trip.places.map(place => ({ ...place, coords: { ...place.coords } })),
+})
+
+const createDefaultData = (): PersistedData => ({
+  version: STORAGE_VERSION,
+  trips: [cloneTrip(INIT_TRIP)],
+  trashedTrips: [],
+  curTripId: INIT_TRIP.id,
+})
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+function isPlace(value: unknown): value is Place {
+  if (!isRecord(value) || !isRecord(value.coords)) return false
+  const validTypes: PlaceType[] = ["attraction", "restaurant", "hotel", "transport", "other"]
+  return typeof value.id === "string"
+    && typeof value.name === "string"
+    && validTypes.includes(value.type as PlaceType)
+    && typeof value.note === "string"
+    && typeof value.address === "string"
+    && (value.dayAssigned === null || (Number.isInteger(value.dayAssigned) && Number(value.dayAssigned) > 0))
+    && Number.isInteger(value.order)
+    && Number(value.order) >= 0
+    && typeof value.coords.x === "number"
+    && Number.isFinite(value.coords.x)
+    && typeof value.coords.y === "number"
+    && Number.isFinite(value.coords.y)
+}
+
+function isTrip(value: unknown): value is Trip {
+  if (!isRecord(value)) return false
+  return typeof value.id === "string"
+    && typeof value.name === "string"
+    && typeof value.destination === "string"
+    && (value.dateMode === "pending" || value.dateMode === "confirmed")
+    && Number.isInteger(value.days)
+    && Number(value.days) > 0
+    && Number(value.days) <= 365
+    && typeof value.startDate === "string"
+    && Array.isArray(value.places)
+    && value.places.every(isPlace)
+}
+
+function isTrashedTrip(value: unknown): value is TrashedTrip {
+  return isTrip(value) && typeof (value as TrashedTrip).trashedAt === "number"
+    && Number.isFinite((value as TrashedTrip).trashedAt)
+}
+
+function loadPersistedData(): PersistedData {
+  if (typeof window === "undefined") return createDefaultData()
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return createDefaultData()
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed)
+      || parsed.version !== STORAGE_VERSION
+      || !Array.isArray(parsed.trips)
+      || !parsed.trips.every(isTrip)
+      || !Array.isArray(parsed.trashedTrips)
+      || !parsed.trashedTrips.every(isTrashedTrip)
+      || typeof parsed.curTripId !== "string") return createDefaultData()
+
+    const trips = parsed.trips as Trip[]
+    const curTripId = parsed.curTripId
+    if ((trips.length === 0 && curTripId !== "") || (trips.length > 0 && !trips.some(t => t.id === curTripId))) {
+      return createDefaultData()
+    }
+    return { version: STORAGE_VERSION, trips, trashedTrips: parsed.trashedTrips as TrashedTrip[], curTripId }
+  } catch {
+    return createDefaultData()
+  }
+}
+
+function savePersistedData(data: PersistedData) {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+  } catch {
+    // Storage can be unavailable in private browsing or when the quota is full.
+  }
+}
 
 const MOCK_LOCS = [
   { name: "故宫博物院",   address: "北京市东城区景山前街4号" },
@@ -381,8 +476,8 @@ function RecycleBinScreen({ trashedTrips, onRestore, onPermDelete, setDlg, onBac
   )
 }
 
-function ProfileScreen({ trashedTrips, onRestore, onPermDelete, setDlg }:
-  { trashedTrips: TrashedTrip[]; onRestore: (id: string) => void; onPermDelete: (id: string) => void; setDlg: (c: DelCfg) => void }) {
+function ProfileScreen({ trashedTrips, onRestore, onPermDelete, onResetData, setDlg }:
+  { trashedTrips: TrashedTrip[]; onRestore: (id: string) => void; onPermDelete: (id: string) => void; onResetData: () => void; setDlg: (c: DelCfg) => void }) {
   const [sub, setSub] = useState<string | null>(null)
   const [notifTrip,  setNotifTrip]  = useState(true)
   const [notifPush,  setNotifPush]  = useState(false)
@@ -643,6 +738,13 @@ function ProfileScreen({ trashedTrips, onRestore, onPermDelete, setDlg }:
             <SettingsRow icon={Trash2}  label="计划回收站" value={trashedTrips.length > 0 ? `${trashedTrips.length}个` : undefined} onClick={() => setSub("recycle-bin")} />
             <div className="h-px mx-5 bg-[#EEE9DC]" />
             <SettingsRow icon={Info}    label="数据与隐私" onClick={() => setSub("privacy")} />
+            <div className="h-px mx-5 bg-[#EEE9DC]" />
+            <SettingsRow icon={RotateCcw} label="重置示例数据" danger onClick={() => setDlg({
+              title: "重置示例数据？",
+              desc: "这会删除当前设备上的全部旅行计划和回收站内容，并恢复初始的北京7日游示例。此操作无法撤销。",
+              confirmLabel: "确认重置",
+              onConfirm: onResetData,
+            })} />
           </div>
         </div>
 
@@ -1378,13 +1480,18 @@ function GlobalNav({ tab, setTab }: { tab: GlobalTab; setTab: (t: GlobalTab) => 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [initialData] = useState<PersistedData>(() => loadPersistedData())
   const [screen,       setScreen]       = useState<Screen>("list")
   const [globalTab,    setGlobalTab]    = useState<GlobalTab>("trips")
   const [wsTab,        setWsTab]        = useState<WsTab>("itinerary")
-  const [trips,        setTrips]        = useState<Trip[]>([INIT_TRIP])
-  const [trashedTrips, setTrashedTrips] = useState<TrashedTrip[]>([])
-  const [curTripId,    setCurTripId]    = useState("t1")
+  const [trips,        setTrips]        = useState<Trip[]>(initialData.trips)
+  const [trashedTrips, setTrashedTrips] = useState<TrashedTrip[]>(initialData.trashedTrips)
+  const [curTripId,    setCurTripId]    = useState(initialData.curTripId)
   const trip = trips.find(t => t.id === curTripId) || trips[0]
+
+  useEffect(() => {
+    savePersistedData({ version: STORAGE_VERSION, trips, trashedTrips, curTripId })
+  }, [trips, trashedTrips, curTripId])
 
   const [selectedDay,  setSelectedDay]  = useState(1)
   const [itvView,      setItvView]      = useState<ItvView>("normal")
@@ -1521,6 +1628,18 @@ export default function App() {
     showToast("旅行已永久删除")
   }
 
+  const resetExampleData = () => {
+    const defaults = createDefaultData()
+    setTrips(defaults.trips)
+    setTrashedTrips(defaults.trashedTrips)
+    setCurTripId(defaults.curTripId)
+    setScreen("list")
+    setGlobalTab("trips")
+    setWsTab("itinerary")
+    setSelectedDay(1)
+    showToast("已恢复示例数据")
+  }
+
   const deleteDay = (day: number) => {
     updateTrip(t => ({
       ...t, days: t.days - 1,
@@ -1573,6 +1692,7 @@ export default function App() {
                   trashedTrips={trashedTrips}
                   onRestore={restoreTrip}
                   onPermDelete={permDeleteTrip}
+                  onResetData={resetExampleData}
                   setDlg={setDlg} />
               )}
             </div>
