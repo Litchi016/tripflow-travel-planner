@@ -29,6 +29,7 @@ interface Trip {
   dateMode: DateMode; days: number; startDate: string; places: Place[]
 }
 interface TrashedTrip extends Trip { trashedAt: number }
+interface UserProfile { displayName: string }
 interface DelCfg {
   title: string; desc: string; confirmLabel?: string; onConfirm: () => void
 }
@@ -75,7 +76,10 @@ interface PersistedData {
   trips: Trip[]
   trashedTrips: TrashedTrip[]
   curTripId: string
+  profile: UserProfile
 }
+
+const DEFAULT_PROFILE: UserProfile = { displayName: "旅行者" }
 
 const cloneTrip = (trip: Trip): Trip => ({
   ...trip,
@@ -87,6 +91,7 @@ const createDefaultData = (): PersistedData => ({
   trips: [cloneTrip(INIT_TRIP)],
   trashedTrips: [],
   curTripId: INIT_TRIP.id,
+  profile: { ...DEFAULT_PROFILE },
 })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -147,7 +152,10 @@ function loadPersistedData(): PersistedData {
     if ((trips.length === 0 && curTripId !== "") || (trips.length > 0 && !trips.some(t => t.id === curTripId))) {
       return createDefaultData()
     }
-    return { version: STORAGE_VERSION, trips, trashedTrips: parsed.trashedTrips as TrashedTrip[], curTripId }
+    const profile = isRecord(parsed.profile) && typeof parsed.profile.displayName === "string" && parsed.profile.displayName.trim()
+      ? { displayName: parsed.profile.displayName.trim().slice(0, 20) }
+      : { ...DEFAULT_PROFILE }
+    return { version: STORAGE_VERSION, trips, trashedTrips: parsed.trashedTrips as TrashedTrip[], curTripId, profile }
   } catch {
     return createDefaultData()
   }
@@ -480,9 +488,10 @@ function RecycleBinScreen({ trashedTrips, onRestore, onPermDelete, setDlg, onBac
   )
 }
 
-function ProfileScreen({ trashedTrips, onRestore, onPermDelete, onResetData, setDlg }:
-  { trashedTrips: TrashedTrip[]; onRestore: (id: string) => void; onPermDelete: (id: string) => void; onResetData: () => void; setDlg: (c: DelCfg) => void }) {
+function ProfileScreen({ profile, onUpdateProfile, trashedTrips, onRestore, onPermDelete, onResetData, setDlg }:
+  { profile: UserProfile; onUpdateProfile: (profile: UserProfile) => void; trashedTrips: TrashedTrip[]; onRestore: (id: string) => void; onPermDelete: (id: string) => void; onResetData: () => void; setDlg: (c: DelCfg) => void }) {
   const [sub, setSub] = useState<string | null>(null)
+  const [draftName, setDraftName] = useState(profile.displayName)
   const [notifTrip,  setNotifTrip]  = useState(true)
   const [notifPush,  setNotifPush]  = useState(false)
   const [darkMode,   setDarkMode]   = useState(false)
@@ -524,9 +533,17 @@ function ProfileScreen({ trashedTrips, onRestore, onPermDelete, onResetData, set
         </div>
         <div>
           <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>显示名称</label>
-          <input defaultValue="旅行者" className="w-full h-12 px-4 rounded-2xl bg-white border border-[#EEE9DC] text-[#2B2924] text-[15px] outline-none focus:border-[#F8DF72]" />
+          <input value={draftName} maxLength={20} onChange={e => setDraftName(e.target.value)} placeholder="请输入显示名称"
+            className="w-full h-12 px-4 rounded-2xl bg-white border border-[#EEE9DC] text-[#2B2924] text-[15px] outline-none focus:border-[#F8DF72]" />
+          <p className="text-[11px] mt-1.5 text-right" style={{ color: TERC }}>{draftName.length}/20</p>
         </div>
-        <Btn variant="primary" className="w-full">保存</Btn>
+        <Btn variant="primary" className="w-full" disabled={!draftName.trim()} onClick={() => {
+          const displayName = draftName.trim()
+          if (!displayName) return
+          onUpdateProfile({ displayName })
+          setDraftName(displayName)
+          setSub(null)
+        }}>保存</Btn>
       </div>
     </SubPageShell>
   )
@@ -722,7 +739,7 @@ function ProfileScreen({ trashedTrips, onRestore, onPermDelete, onResetData, set
             <User size={28} strokeWidth={1.5} className="text-[#2B2924]" />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-[17px] font-bold text-[#2B2924]">旅行者</p>
+            <p className="text-[17px] font-bold text-[#2B2924] truncate">{profile.displayName}</p>
             <p className="text-[12px] mt-0.5" style={{ color: SEC }}>本地账号 · 数据仅保存在本设备</p>
           </div>
           <button onClick={() => setSub("edit-profile")}
@@ -825,11 +842,13 @@ function CreateTripScreen({ form, setForm, onBack, onSave }:
           <div>
             <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>旅行天数</label>
             <div className="flex items-center gap-4 bg-white rounded-2xl border border-[#EEE9DC] px-4 py-3">
-              <button onClick={() => setForm(f => ({ ...f, days: Math.max(1, f.days - 1) }))}
-                className="w-10 h-10 rounded-xl bg-[#EEE9DC] flex items-center justify-center text-[#2B2924] text-xl font-bold">−</button>
+              <button type="button" aria-label="减少一天" disabled={form.days <= 1}
+                onClick={() => setForm(f => ({ ...f, days: Math.max(1, f.days - 1) }))}
+                className="w-11 h-11 rounded-xl bg-[#EEE9DC] flex items-center justify-center text-[#2B2924] text-xl font-bold disabled:opacity-35 disabled:cursor-not-allowed active:scale-95">−</button>
               <span className="flex-1 text-center text-[20px] font-bold text-[#2B2924]">{form.days}天</span>
-              <button onClick={() => setForm(f => ({ ...f, days: Math.min(30, f.days + 1) }))}
-                className="w-10 h-10 rounded-xl bg-[#EEE9DC] flex items-center justify-center text-[#2B2924] text-xl font-bold">＋</button>
+              <button type="button" aria-label="增加一天" disabled={form.days >= 30}
+                onClick={() => setForm(f => ({ ...f, days: Math.min(30, f.days + 1) }))}
+                className="w-11 h-11 rounded-xl bg-[#EEE9DC] flex items-center justify-center text-[#2B2924] text-xl font-bold disabled:opacity-35 disabled:cursor-not-allowed active:scale-95">＋</button>
             </div>
           </div>
         ) : (
@@ -842,9 +861,13 @@ function CreateTripScreen({ form, setForm, onBack, onSave }:
             <div className="flex-1">
               <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>旅行天数</label>
               <div className="flex items-center gap-2 bg-white border border-[#EEE9DC] rounded-2xl px-3 h-12">
-                <button onClick={() => setForm(f => ({ ...f, days: Math.max(1, f.days - 1) }))} className="text-[18px] font-bold w-6" style={{ color: SEC }}>−</button>
+                <button type="button" aria-label="减少一天" disabled={form.days <= 1}
+                  onClick={() => setForm(f => ({ ...f, days: Math.max(1, f.days - 1) }))}
+                  className="text-[18px] font-bold w-10 h-10 rounded-xl flex items-center justify-center disabled:opacity-35 active:bg-[#EEE9DC]" style={{ color: SEC }}>−</button>
                 <span className="flex-1 text-center text-[15px] font-semibold text-[#2B2924]">{form.days}天</span>
-                <button onClick={() => setForm(f => ({ ...f, days: Math.min(30, f.days + 1) }))} className="text-[18px] font-bold w-6" style={{ color: SEC }}>＋</button>
+                <button type="button" aria-label="增加一天" disabled={form.days >= 30}
+                  onClick={() => setForm(f => ({ ...f, days: Math.min(30, f.days + 1) }))}
+                  className="text-[18px] font-bold w-10 h-10 rounded-xl flex items-center justify-center disabled:opacity-35 active:bg-[#EEE9DC]" style={{ color: SEC }}>＋</button>
               </div>
             </div>
           </div>
@@ -928,7 +951,7 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
                 <button key={t} onClick={() => setForm(f => ({ ...f, type: t }))}
                   className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-2xl border-2 transition-all ${active ? "border-[#F8DF72] bg-[#FFFBE8]" : "border-[#EEE9DC] bg-white"}`}>
                   <Icon size={18} strokeWidth={1.5} style={{ color: active ? "#2B2924" : TERC }} />
-                  <span className={`text-[10px] font-medium`} style={{ color: active ? "#2B2924" : TERC }}>{TYPE_LABEL[t]}</span>
+                  <span translate="no" lang="zh-CN" className="text-[10px] font-medium" style={{ color: active ? "#2B2924" : TERC }}>{TYPE_LABEL[t]}</span>
                 </button>
               )
             })}
@@ -1038,25 +1061,26 @@ function TripSettingsScreen({ trip, onBack, onUpdate, setDlg, onDeleteDay, onSof
                   <div key={day} className="flex items-center px-4 py-3 border-b border-[#EEE9DC] last:border-0">
                     <span className="text-[14px] text-[#2B2924] flex-1">第{day}天</span>
                     {cnt > 0 && <span className="text-[12px] mr-3" style={{ color: TERC }}>{cnt}个地点</span>}
-                    <button onClick={() => {
+                    <button type="button" disabled={days <= 1} onClick={() => {
                       if (cnt > 0) {
                         setDlg({
                           title: `删除第${day}天？`,
                           desc: `这一天有${cnt}个地点。删除日期后，这些地点会返回待安排地点池，不会被彻底删除。`,
                           confirmLabel: "删除日期",
-                          onConfirm: () => { onDeleteDay(day); setDays(d => d - 1) }
+                          onConfirm: () => { onDeleteDay(day); setDays(d => Math.max(1, d - 1)) }
                         })
                       } else {
-                        onDeleteDay(day); setDays(d => d - 1)
+                        onDeleteDay(day); setDays(d => Math.max(1, d - 1))
                       }
-                    }} className="w-8 h-8 flex items-center justify-center text-[#C96B58] active:scale-95">
+                    }} className="w-10 h-10 rounded-xl flex items-center justify-center text-[#C96B58] disabled:opacity-25 disabled:cursor-not-allowed active:bg-[#FEF6F4] active:scale-95">
                       <X size={16} strokeWidth={2} />
                     </button>
                   </div>
                 )
               })}
-              <button onClick={() => { setDays(d => d + 1); onUpdate({ ...trip, name, destination: dest, dateMode, days: days + 1, startDate }) }}
-                className="w-full py-3 text-[13px] border-t border-dashed border-[#EEE9DC] flex items-center justify-center gap-2 active:bg-[#FFFCF3]"
+              <button type="button" disabled={days >= 30}
+                onClick={() => { const nextDays = Math.min(30, days + 1); setDays(nextDays); onUpdate({ ...trip, name, destination: dest, dateMode, days: nextDays, startDate }) }}
+                className="w-full py-3 text-[13px] border-t border-dashed border-[#EEE9DC] flex items-center justify-center gap-2 disabled:opacity-35 disabled:cursor-not-allowed active:bg-[#FFFCF3]"
                 style={{ color: SEC }}>
                 <Plus size={15} /> 增加一天
               </button>
@@ -1474,11 +1498,12 @@ export default function App() {
   const [trips,        setTrips]        = useState<Trip[]>(initialData.trips)
   const [trashedTrips, setTrashedTrips] = useState<TrashedTrip[]>(initialData.trashedTrips)
   const [curTripId,    setCurTripId]    = useState(initialData.curTripId)
+  const [profile,      setProfile]      = useState<UserProfile>(initialData.profile)
   const trip = trips.find(t => t.id === curTripId) || trips[0]
 
   useEffect(() => {
-    savePersistedData({ version: STORAGE_VERSION, trips, trashedTrips, curTripId })
-  }, [trips, trashedTrips, curTripId])
+    savePersistedData({ version: STORAGE_VERSION, trips, trashedTrips, curTripId, profile })
+  }, [trips, trashedTrips, curTripId, profile])
 
   const [selectedDay,  setSelectedDay]  = useState(1)
   const [itvView,      setItvView]      = useState<ItvView>("normal")
@@ -1641,6 +1666,7 @@ export default function App() {
   }
 
   const deleteDay = (day: number) => {
+    if (!trip || trip.days <= 1) return
     updateTrip(t => ({
       ...t, days: t.days - 1,
       places: t.places.map(p => {
@@ -1684,6 +1710,8 @@ export default function App() {
                   onSoftDelete={softDeleteTrip} />
               ) : (
                 <ProfileScreen
+                  profile={profile}
+                  onUpdateProfile={nextProfile => { setProfile(nextProfile); showToast("资料已保存") }}
                   trashedTrips={trashedTrips}
                   onRestore={restoreTrip}
                   onPermDelete={permDeleteTrip}
