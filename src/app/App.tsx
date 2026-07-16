@@ -1510,7 +1510,7 @@ export default function App() {
   const [dayPicker,    setDayPicker]    = useState({ open: false, placeId: "", selectedDay: null as number | null, mode: "arrange" as DayPickerMode })
   const [placeAct,     setPlaceAct]     = useState({ open: false, id: "", source: "itinerary" as "itinerary" | "pool" })
   const [mapSum,       setMapSum]       = useState({ open: false, id: "" })
-  const [extMap,       setExtMap]       = useState(false)
+  const [extMapPlaceId, setExtMapPlaceId] = useState<string | null>(null)
   const [addOpts,      setAddOpts]      = useState(false)
   const [fromPool,     setFromPool]     = useState(false)
   const [dlg,          setDlg]          = useState<DelCfg | null>(null)
@@ -1521,6 +1521,19 @@ export default function App() {
     clearTimeout(toastRef.current)
     setToast({ msg, undo })
     toastRef.current = setTimeout(() => setToast(null), 3500)
+  }
+
+  const extMapPlace = trip?.places.find(p => p.id === extMapPlaceId)
+
+  const openExternalMap = (provider: "amap" | "baidu") => {
+    if (!extMapPlace) return
+    const keyword = [extMapPlace.name, extMapPlace.address.trim()].filter(Boolean).join(" ")
+    const city = trip?.destination.trim() || "全国"
+    const url = provider === "amap"
+      ? `https://uri.amap.com/search?keyword=${encodeURIComponent(keyword)}&city=${encodeURIComponent(city)}&view=map&src=tripflow&callnative=0`
+      : `https://api.map.baidu.com/place/search?query=${encodeURIComponent(keyword)}&region=${encodeURIComponent(city)}&output=html&src=webapp.tripflow.travelplanner`
+    window.open(url, "_blank", "noopener,noreferrer")
+    setExtMapPlaceId(null)
   }
 
   const updateTrip = (fn: (t: Trip) => Trip) => {
@@ -1839,7 +1852,7 @@ export default function App() {
                   { label: "移动到其他日期", icon: ChevronRight, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, selectedDay: actPlace.dayAssigned, mode: "move" }) } },
                   { label: "移回待安排地点", icon: RotateCcw,    fn: () => { setPlaceAct(a => ({ ...a, open: false })); returnToPool(actPlace.id) } },
                   { label: "编辑地点",       icon: Edit3,        fn: () => { setPlaceAct(a => ({ ...a, open: false })); openEditPlace(actPlace.id) } },
-                  { label: "查看外部地图",   icon: Navigation2,  fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMap(true) } },
+                  { label: "在高德/百度地图中查看", icon: Navigation2, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMapPlaceId(actPlace.id) } },
                 ].map(({ label, icon: Icon, fn }) => (
                   <button key={label} onClick={fn} className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3] text-[#2B2924]">
                     <Icon size={17} strokeWidth={1.5} style={{ color: SEC }} />
@@ -1868,7 +1881,7 @@ export default function App() {
                 </div>
                 {[
                   { label: "编辑地点",     icon: Edit3,       fn: () => { setPlaceAct(a => ({ ...a, open: false })); openEditPlace(actPlace.id) } },
-                  { label: "查看外部地图", icon: Navigation2, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMap(true) } },
+                  { label: "在高德/百度地图中查看", icon: Navigation2, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMapPlaceId(actPlace.id) } },
                 ].map(({ label, icon: Icon, fn }) => (
                   <button key={label} onClick={fn} className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3] text-[#2B2924]">
                     <Icon size={17} strokeWidth={1.5} style={{ color: SEC }} />
@@ -1906,7 +1919,7 @@ export default function App() {
                   {mapPlace.dayAssigned ? "移动到其他日期" : "安排到某一天"}
                 </Btn>
                 <Btn variant="secondary" className="text-[14px] px-4"
-                  onClick={() => { setMapSum(m => ({ ...m, open: false })); setExtMap(true) }}>
+                  onClick={() => { setMapSum(m => ({ ...m, open: false })); setExtMapPlaceId(mapPlace.id) }}>
                   <Navigation2 size={15} /> 外部地图
                 </Btn>
               </div>
@@ -1915,17 +1928,18 @@ export default function App() {
         </Sheet>
 
         {/* ── External Map Dialog ─────────────────────────────────── */}
-        {extMap && (
+        {extMapPlace && (
           <>
-            <div className="fixed inset-0 bg-black/40 z-50" onClick={() => setExtMap(false)} />
+            <div className="fixed inset-0 bg-black/40 z-50" onClick={() => setExtMapPlaceId(null)} />
             <div className="fixed inset-x-5 top-1/2 -translate-y-1/2 bg-white rounded-3xl z-50 p-6 max-w-[370px] mx-auto shadow-2xl">
-              <h3 className="text-[17px] font-semibold text-[#2B2924] mb-2">使用地图查看路线</h3>
-              <p className="text-[13px] leading-relaxed mb-5" style={{ color: SEC }}>路线和正式导航将由专业地图提供，本产品仅用于整理行程。</p>
+              <h3 className="text-[17px] font-semibold text-[#2B2924] mb-2">即将离开 TripFlow</h3>
+              <p className="text-[13px] leading-relaxed mb-1" style={{ color: SEC }}>将在新标签页中搜索「{extMapPlace.name}」。</p>
+              <p className="text-[12px] leading-relaxed mb-5" style={{ color: TERC }}>地点结果、路线和导航由外部地图提供，返回后你的 TripFlow 行程不会改变。</p>
               <div className="flex gap-3 mb-4">
-                <button onClick={() => setExtMap(false)} className="flex-1 h-12 rounded-2xl bg-[#3478F6] text-white font-semibold text-[15px] active:opacity-90">百度地图</button>
-                <button onClick={() => setExtMap(false)} className="flex-1 h-12 rounded-2xl bg-[#1BA784] text-white font-semibold text-[15px] active:opacity-90">高德地图</button>
+                <button onClick={() => openExternalMap("baidu")} className="flex-1 h-12 rounded-2xl bg-[#3478F6] text-white font-semibold text-[15px] active:opacity-90">百度地图</button>
+                <button onClick={() => openExternalMap("amap")} className="flex-1 h-12 rounded-2xl bg-[#1BA784] text-white font-semibold text-[15px] active:opacity-90">高德地图</button>
               </div>
-              <button onClick={() => setExtMap(false)} className="w-full text-center text-[14px] py-2" style={{ color: SEC }}>取消</button>
+              <button onClick={() => setExtMapPlaceId(null)} className="w-full text-center text-[14px] py-2" style={{ color: SEC }}>取消</button>
             </div>
           </>
         )}
