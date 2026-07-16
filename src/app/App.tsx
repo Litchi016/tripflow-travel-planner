@@ -173,6 +173,10 @@ const MOCK_LOCS = [
   { name: "北京南站",     address: "北京市丰台区马家堡西路" },
   { name: "首都国际机场", address: "北京市顺义区天竺" },
   { name: "鸟巢",         address: "北京市朝阳区国家体育场南路" },
+  { name: "西湖风景名胜区", address: "浙江省杭州市西湖区龙井路1号" },
+  { name: "灵隐寺",       address: "浙江省杭州市西湖区法云弄1号" },
+  { name: "雷峰塔景区",   address: "浙江省杭州市西湖区南山路15号" },
+  { name: "杭州东站",     address: "浙江省杭州市上城区全福桥路2号" },
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -860,23 +864,23 @@ function CreateTripScreen({ form, setForm, onBack, onSave }:
 
 function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
   { form: { name: string; type: PlaceType; note: string; address: string }; setForm: React.Dispatch<React.SetStateAction<{ name: string; type: PlaceType; note: string; address: string }>>; editingId: string | null; onBack: () => void; onSave: (f: { name: string; type: PlaceType; note: string; address: string }) => void }) {
-  const [sq, setSq] = useState("")
   const [results, setResults] = useState<typeof MOCK_LOCS>([])
-  const [locSelected, setLocSelected] = useState(!!form.address)
-  const [notFound, setNotFound] = useState(false)
+  const [showResults, setShowResults] = useState(false)
   const [nameErr, setNameErr] = useState("")
 
   const TYPES: PlaceType[] = ["attraction", "restaurant", "hotel", "transport", "other"]
   const TIconMap: Record<PlaceType, React.ElementType> = { attraction: Landmark, restaurant: Utensils, hotel: Building2, transport: Plane, other: Circle }
 
-  const handleSearch = (q: string) => {
-    setSq(q); setLocSelected(false)
-    if (q.trim()) { const r = searchLocs(q); setResults(r); setNotFound(r.length === 0) }
-    else { setResults([]); setNotFound(false) }
+  const handleNameChange = (q: string) => {
+    setForm(f => ({ ...f, name: q, address: "" }))
+    setNameErr("")
+    setResults(searchLocs(q))
+    setShowResults(!!q.trim())
   }
   const handleSelect = (r: typeof MOCK_LOCS[0]) => {
-    setForm(f => ({ ...f, address: r.address, name: f.name || r.name }))
-    setSq(r.name); setResults([]); setLocSelected(true); setNotFound(false)
+    setForm(f => ({ ...f, name: r.name, address: r.address }))
+    setResults([])
+    setShowResults(false)
   }
 
   return (
@@ -888,9 +892,31 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
       <div className="flex-1 overflow-y-auto px-4 pb-4 flex flex-col gap-4" style={{ scrollbarWidth: "none" }}>
         <div>
           <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>地点名称 *</label>
-          <input value={form.name} onChange={e => { setForm(f => ({ ...f, name: e.target.value })); setNameErr("") }} placeholder="输入地点名称"
-            className={`w-full h-12 px-4 rounded-2xl bg-white border text-[#2B2924] text-[15px] placeholder:text-[#A9A69F] outline-none transition-colors ${nameErr ? "border-[#C96B58]" : "border-[#EEE9DC] focus:border-[#F8DF72]"}`} />
+          <div className="relative">
+            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: TERC }} />
+            <input value={form.name} onChange={e => handleNameChange(e.target.value)} placeholder="输入名称，自动搜索地点"
+              className={`w-full h-12 pl-10 pr-4 rounded-2xl bg-white border text-[#2B2924] text-[15px] placeholder:text-[#A9A69F] outline-none transition-colors ${nameErr ? "border-[#C96B58]" : "border-[#EEE9DC] focus:border-[#F8DF72]"}`} />
+          </div>
           {nameErr && <p className="text-[12px] text-[#C96B58] mt-1">{nameErr}</p>}
+          {showResults && results.length > 0 && (
+            <div className="mt-1 bg-white rounded-2xl border border-[#EEE9DC] overflow-hidden shadow-sm">
+              {results.map((r, i) => (
+                <button key={`${r.name}-${i}`} onClick={() => handleSelect(r)} className="w-full px-4 py-3 text-left border-b border-[#EEE9DC] last:border-0 active:bg-[#FFFCF3]">
+                  <p className="text-[14px] font-medium text-[#2B2924]">{r.name}</p>
+                  <p className="text-[12px]" style={{ color: TERC }}>{r.address}</p>
+                </button>
+              ))}
+            </div>
+          )}
+          {showResults && results.length === 0 && (
+            <p className="text-[12px] mt-2 px-1" style={{ color: TERC }}>未找到匹配地点，将只保存名称并暂不设置位置</p>
+          )}
+          {!showResults && form.address && (
+            <div className="mt-2 flex items-start gap-2 px-1">
+              <MapPin size={14} className="shrink-0 mt-0.5 text-[#76966F]" />
+              <p className="text-[12px] leading-relaxed" style={{ color: SEC }}>{form.address}</p>
+            </div>
+          )}
         </div>
         <div>
           <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>地点类型</label>
@@ -913,45 +939,6 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
           <textarea value={form.note} onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
             placeholder="添加备注，如开放时间、预约提醒等" rows={2}
             className="w-full px-4 py-3 rounded-2xl bg-white border border-[#EEE9DC] text-[#2B2924] text-[14px] placeholder:text-[#A9A69F] outline-none focus:border-[#F8DF72] resize-none transition-colors" />
-        </div>
-        <div>
-          <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>地点位置（选填）</label>
-          <div className="relative">
-            <div className="absolute left-3 top-1/2 -translate-y-1/2"><Search size={15} style={{ color: TERC }} /></div>
-            <input type="text" value={sq} onChange={e => handleSearch(e.target.value)} placeholder="搜索地点名称"
-              className="w-full h-12 pl-10 pr-4 rounded-2xl bg-white border border-[#EEE9DC] text-[#2B2924] text-[14px] placeholder:text-[#A9A69F] outline-none focus:border-[#F8DF72] transition-colors" />
-          </div>
-          {results.length > 0 && (
-            <div className="mt-1 bg-white rounded-2xl border border-[#EEE9DC] overflow-hidden shadow-sm">
-              {results.map((r, i) => (
-                <button key={i} onClick={() => handleSelect(r)} className="w-full px-4 py-3 text-left border-b border-[#EEE9DC] last:border-0 active:bg-[#FFFCF3]">
-                  <p className="text-[14px] font-medium text-[#2B2924]">{r.name}</p>
-                  <p className="text-[12px]" style={{ color: TERC }}>{r.address}</p>
-                </button>
-              ))}
-            </div>
-          )}
-          {notFound && (
-            <div className="mt-2 p-4 bg-[#FEF6F4] rounded-2xl border border-[#F0C4BC]">
-              <div className="flex items-center gap-2 mb-1"><AlertCircle size={14} className="text-[#C96B58]" /><p className="text-[14px] font-medium text-[#C96B58]">没有找到准确位置</p></div>
-              <p className="text-[12px] leading-relaxed mb-3" style={{ color: SEC }}>可以修改地点名称，或稍后在外部地图中确认。</p>
-              <div className="flex gap-2">
-                <button onClick={() => { setSq(""); setNotFound(false) }} className="flex-1 h-9 rounded-xl border border-[#EEE9DC] text-[13px] text-[#2B2924] bg-white font-medium">重新搜索</button>
-                <button onClick={() => setNotFound(false)} className="flex-1 h-9 rounded-xl text-[13px]" style={{ color: SEC }}>暂不设置位置</button>
-              </div>
-            </div>
-          )}
-          {locSelected && form.address && (
-            <div className="mt-2 p-3 bg-white rounded-2xl border border-[#EEE9DC] flex items-center gap-3">
-              <div className="w-10 h-10 bg-[#F7E8AA] rounded-xl flex items-center justify-center shrink-0">
-                <MapPin size={18} strokeWidth={1.5} className="text-[#2B2924]" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[13px] font-medium text-[#2B2924] truncate">{form.address}</p>
-                <p className="text-[11px] text-[#76966F]">位置已选定</p>
-              </div>
-            </div>
-          )}
         </div>
       </div>
       <div className="px-4 pb-10 pt-3 shrink-0">
