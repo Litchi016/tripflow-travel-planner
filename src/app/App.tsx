@@ -1681,12 +1681,7 @@ export default function App() {
                   onSelect={id => { setCurTripId(id); setScreen("workspace"); setWsTab("itinerary"); setSelectedDay(1) }}
                   onCreate={() => setScreen("create")}
                   setDlg={setDlg}
-                  onSoftDelete={id => setDlg({
-                    title: "移入回收站？",
-                    desc: `「${trips.find(t => t.id === id)?.name}」将移入回收站，30天后自动永久删除。`,
-                    confirmLabel: "移入回收站",
-                    onConfirm: () => softDeleteTrip(id),
-                  })} />
+                  onSoftDelete={softDeleteTrip} />
               ) : (
                 <ProfileScreen
                   trashedTrips={trashedTrips}
