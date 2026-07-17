@@ -1303,31 +1303,36 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
 
   if (isReorder) {
     return (
-      <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full" onContextMenu={event => event.preventDefault()}
+        style={{ userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" } as React.CSSProperties}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#EEE9DC] shrink-0">
           <button onClick={onCancelReorder} className="text-[15px] px-1" style={{ color: SEC }}>取消</button>
           <span className="text-[15px] font-semibold text-[#2B2924]">调整顺序</span>
           <button onClick={onDoneReorder} className="text-[15px] font-semibold text-[#C8A200] px-1">完成</button>
         </div>
+        <p className="px-4 pt-3 text-[12px] shrink-0" style={{ color: SEC }}>按住右侧手柄上下拖动，松手后保存当前位置</p>
         <div className="flex-1 overflow-y-auto px-4 py-3" style={{ scrollbarWidth: "none" }}>
           {dayPlaces.map(place => (
             <div key={place.visitId} data-visit-id={place.visitId}
-              className={`flex items-center gap-3 bg-white rounded-2xl px-4 py-3.5 mb-2 transition-all ${dragVisitId === place.visitId ? "scale-[1.02] shadow-lg opacity-90" : ""}`}
-              style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
-              <button type="button" aria-label={`拖动${place.name}调整顺序`}
-                onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); setDragVisitId(place.visitId) }}
-                onPointerMove={handleDragMove}
-                onPointerUp={event => { event.currentTarget.releasePointerCapture(event.pointerId); setDragVisitId(null) }}
-                onPointerCancel={() => setDragVisitId(null)}
-                className="w-11 h-11 -ml-2 flex items-center justify-center shrink-0 cursor-grab active:cursor-grabbing"
-                style={{ touchAction: "none", color: "#C8C4BC" }}>
-                <GripVertical size={22} />
-              </button>
+              className={`relative flex items-center gap-3 rounded-2xl px-4 py-3.5 mb-2 border transition-[transform,box-shadow,background-color,border-color,opacity] duration-150
+                ${dragVisitId === place.visitId
+                  ? "bg-[#FFF3AE] border-[#E0BE24] scale-[1.035] -translate-y-0.5 z-20"
+                  : dragVisitId ? "bg-white border-[#EEE9DC] opacity-70" : "bg-white border-transparent"}`}
+              style={{ boxShadow: dragVisitId === place.visitId ? "0 14px 32px rgba(127,100,0,0.26)" : "0 2px 8px rgba(43,41,36,0.08)" }}>
               <div className="flex-1 min-w-0">
                 <p className="text-[15px] font-medium text-[#2B2924] truncate">{place.name}</p>
                 <p className="text-[12px]" style={{ color: SEC }}>{visitTimeLabel(place) || TYPE_LABEL[place.type]}</p>
               </div>
-              <span className="text-[11px]" style={{ color: TERC }}>长按拖动</span>
+              <button type="button" aria-label={`拖动${place.name}调整顺序`}
+                onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setDragVisitId(place.visitId); if (navigator.vibrate) navigator.vibrate(12) }}
+                onPointerMove={event => { event.preventDefault(); handleDragMove(event) }}
+                onPointerUp={event => { event.preventDefault(); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setDragVisitId(null) }}
+                onPointerCancel={() => setDragVisitId(null)}
+                className={`w-12 h-12 -mr-2 flex items-center justify-center shrink-0 rounded-xl cursor-grab active:cursor-grabbing transition-colors
+                  ${dragVisitId === place.visitId ? "bg-[#E4C641] text-[#2B2924]" : "bg-[#F7F4EA] text-[#A9A69F]"}`}
+                style={{ touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+                <GripVertical size={24} strokeWidth={2.3} />
+              </button>
             </div>
           ))}
         </div>
@@ -1647,7 +1652,6 @@ export default function App() {
   const [dayPicker,    setDayPicker]    = useState({ open: false, placeId: "", visitId: "", selectedDay: null as number | null, mode: "arrange" as DayPickerMode })
   const [placeAct,     setPlaceAct]     = useState({ open: false, id: "", source: "itinerary" as "itinerary" | "pool" })
   const [timeEditor,   setTimeEditor]   = useState({ open: false, visitId: "", arrivalTime: "", durationMinutes: null as number | null })
-  const [scheduleListPlaceId, setScheduleListPlaceId] = useState<string | null>(null)
   const [mapSum,       setMapSum]       = useState({ open: false, id: "" })
   const [extMapPlaceId, setExtMapPlaceId] = useState<string | null>(null)
   const [addOpts,      setAddOpts]      = useState(false)
@@ -1842,7 +1846,6 @@ export default function App() {
     ? activeVisitInfo?.place || null
     : placeAct.id ? trip?.places.find(p => p.id === placeAct.id) || null : null
   const mapPlace  = mapSum.id    ? trip?.places.find(p => p.id === mapSum.id)     : null
-  const scheduleListPlace = scheduleListPlaceId ? trip?.places.find(p => p.id === scheduleListPlaceId) || null : null
   const pool      = trip ? getPool(trip.places) : []
 
   const toastBottom = screen === "workspace" ? (isReorder ? 100 : 100) : 96
@@ -2025,7 +2028,6 @@ export default function App() {
                   { label: "安排到其他日期", icon: ChevronRight, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, visitId: actVisit.id, selectedDay: actVisit.day, mode: "move" }) } },
                   { label: "再安排一次", icon: Plus, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, visitId: "", selectedDay: null, mode: "repeat" }) } },
                   { label: "设置到达时间与停留时长", icon: Clock3, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setTimeEditor({ open: true, visitId: actVisit.id, arrivalTime: actVisit.arrivalTime, durationMinutes: actVisit.durationMinutes }) } },
-                  { label: "查看全部安排", icon: CalendarDays, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setScheduleListPlaceId(actPlace.id) } },
                   { label: "编辑地点",       icon: Edit3,        fn: () => { setPlaceAct(a => ({ ...a, open: false })); openEditPlace(actPlace.id) } },
                   { label: "在高德/百度地图中查看", icon: Navigation2, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMapPlaceId(actPlace.id) } },
                 ].map(({ label, icon: Icon, fn }) => (
@@ -2039,11 +2041,6 @@ export default function App() {
                   className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3]">
                   <Trash2 size={17} strokeWidth={1.5} className="text-[#C96B58]" />
                   <span className="text-[15px] text-[#C96B58]">删除本次安排</span>
-                </button>
-                <button onClick={() => { setPlaceAct(a => ({ ...a, open: false })); setDlg({ title: `从地点池彻底删除${actPlace.name}？`, desc: `地点本身及全部${actPlace.visits.length}次行程安排都会删除，此操作不可撤销。`, onConfirm: () => deletePlace(actPlace.id) }) }}
-                  className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3]">
-                  <Trash2 size={17} strokeWidth={1.5} className="text-[#A84E3D]" />
-                  <span className="text-[15px] text-[#A84E3D]">从地点池彻底删除</span>
                 </button>
               </div>
             )}
@@ -2109,30 +2106,6 @@ export default function App() {
               setTimeEditor(v => ({ ...v, open: false }))
             }}>保存</Btn>
           </div>
-        </Sheet>
-
-        {/* ── All schedules for one place ───────────────────────── */}
-        <Sheet open={scheduleListPlaceId !== null} onClose={() => setScheduleListPlaceId(null)} title="全部安排">
-          {scheduleListPlace && (
-            <div className="px-5 pb-7">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-2xl flex items-center justify-center" style={{ background: TYPE_BG[scheduleListPlace.type] }}>
-                  <TIcon type={scheduleListPlace.type} size={18} />
-                </div>
-                <div><p className="text-[16px] font-semibold text-[#2B2924]">{scheduleListPlace.name}</p><p className="text-[12px]" style={{ color: SEC }}>共 {scheduleListPlace.visits.length} 次安排</p></div>
-              </div>
-              <div className="flex flex-col gap-2 mb-4">
-                {scheduleListPlace.visits.slice().sort((a, b) => a.day - b.day || a.order - b.order).map(visit => (
-                  <div key={visit.id} className="bg-[#FFFCF3] border border-[#EEE9DC] rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
-                    <div><p className="text-[14px] font-medium text-[#2B2924]">第{visit.day}天</p><p className="text-[12px]" style={{ color: SEC }}>{visitTimeLabel({ ...scheduleListPlace, ...visit, placeId: scheduleListPlace.id, visitId: visit.id }) || "未设置到达时间"}</p></div>
-                    <button className="text-[12px] px-3 h-8 rounded-xl border border-[#E5DFD0] bg-white" style={{ color: SEC }}
-                      onClick={() => { setScheduleListPlaceId(null); setTimeEditor({ open: true, visitId: visit.id, arrivalTime: visit.arrivalTime, durationMinutes: visit.durationMinutes }) }}>编辑时间</button>
-                  </div>
-                ))}
-              </div>
-              <Btn variant="secondary" className="w-full" onClick={() => { setScheduleListPlaceId(null); setDayPicker({ open: true, placeId: scheduleListPlace.id, visitId: "", selectedDay: null, mode: "repeat" }) }}><Plus size={15} /> 再安排一次</Btn>
-            </div>
-          )}
         </Sheet>
 
         {/* ── Map Place Summary Sheet ─────────────────────────────── */}
