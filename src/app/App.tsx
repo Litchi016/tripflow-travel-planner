@@ -5,7 +5,7 @@ import {
   LayoutList, CalendarDays, Check, GripVertical,
   ChevronUp, ChevronDown, Search, Trash2, Edit3,
   Navigation2, CheckCircle2, Map as MapIcon,
-  RotateCcw, ChevronRight, AlertCircle,
+  RotateCcw, ChevronRight, AlertCircle, Clock3,
   User, Bell, Globe, Sun, Shield, HelpCircle, Info, MessageSquare
 } from "lucide-react"
 
@@ -17,17 +17,27 @@ type Screen = "list" | "create" | "workspace" | "add-place" | "settings"
 type WsTab = "pool" | "itinerary" | "map"
 type ItvView = "normal" | "compact"
 type GlobalTab = "trips" | "profile"
-type DayPickerMode = "arrange" | "move"
+type DayPickerMode = "arrange" | "repeat" | "move"
+
+interface Visit {
+  id: string
+  day: number
+  order: number
+  arrivalTime: string
+  durationMinutes: number | null
+}
 
 interface Place {
   id: string; name: string; type: PlaceType; note: string
   address: string; dayAssigned: number | null; order: number
   coords: { x: number; y: number }
+  visits: Visit[]
 }
 interface Trip {
   id: string; name: string; destination: string
   dateMode: DateMode; days: number; startDate: string; places: Place[]
 }
+type DayPlace = Place & Visit & { placeId: string; visitId: string }
 interface TrashedTrip extends Trip { trashedAt: number }
 interface UserProfile { displayName: string }
 interface DelCfg {
@@ -50,7 +60,7 @@ const TERC = "#A9A69F"
 
 // ─── Initial Data ─────────────────────────────────────────────────────────────
 
-const INIT_PLACES: Place[] = [
+const LEGACY_INIT_PLACES: Omit<Place, "visits">[] = [
   { id: "p1",  name: "故宫博物院",      type: "attraction", note: "需要提前预约", address: "北京市东城区景山前街4号",       dayAssigned: 1,    order: 1, coords: { x: 194, y: 162 } },
   { id: "p2",  name: "北海公园",        type: "attraction", note: "",           address: "北京市西城区文津街1号",         dayAssigned: 1,    order: 2, coords: { x: 160, y: 150 } },
   { id: "p3",  name: "什刹海",          type: "attraction", note: "",           address: "北京市西城区什刹海",            dayAssigned: 1,    order: 3, coords: { x: 146, y: 137 } },
@@ -66,13 +76,23 @@ const INIT_PLACES: Place[] = [
   { id: "p13", name: "刘记炙子烤肉",    type: "restaurant", note: "",           address: "北京市朝阳区三里屯路",         dayAssigned: null, order: 0, coords: { x: 270, y: 158 } },
   { id: "p14", name: "北京大兴国际机场", type: "transport",  note: "",           address: "北京市大兴区榆磐路",           dayAssigned: null, order: 0, coords: { x: 198, y: 368 } },
 ]
+const INIT_PLACES: Place[] = LEGACY_INIT_PLACES.map(place => ({
+  ...place,
+  visits: place.dayAssigned === null ? [] : [{
+    id: `v_${place.id}`,
+    day: place.dayAssigned,
+    order: place.order,
+    arrivalTime: "",
+    durationMinutes: null,
+  }],
+}))
 const INIT_TRIP: Trip = { id: "t1", name: "北京7日游", destination: "北京", dateMode: "pending", days: 7, startDate: "", places: INIT_PLACES }
 
 const STORAGE_KEY = "tripflow.app-data"
-const STORAGE_VERSION = 1
+const STORAGE_VERSION = 2
 
 interface PersistedData {
-  version: 1
+  version: 2
   trips: Trip[]
   trashedTrips: TrashedTrip[]
   curTripId: string
@@ -83,7 +103,7 @@ const DEFAULT_PROFILE: UserProfile = { displayName: "旅行者" }
 
 const cloneTrip = (trip: Trip): Trip => ({
   ...trip,
-  places: trip.places.map(place => ({ ...place, coords: { ...place.coords } })),
+  places: trip.places.map(place => ({ ...place, coords: { ...place.coords }, visits: place.visits.map(visit => ({ ...visit })) })),
 })
 
 const createDefaultData = (): PersistedData => ({
@@ -97,7 +117,7 @@ const createDefaultData = (): PersistedData => ({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
-function isPlace(value: unknown): value is Place {
+function isPlaceBase(value: unknown): value is Omit<Place, "visits"> {
   if (!isRecord(value) || !isRecord(value.coords)) return false
   const validTypes: PlaceType[] = ["attraction", "restaurant", "hotel", "transport", "other"]
   return typeof value.id === "string"
@@ -112,6 +132,20 @@ function isPlace(value: unknown): value is Place {
     && Number.isFinite(value.coords.x)
     && typeof value.coords.y === "number"
     && Number.isFinite(value.coords.y)
+}
+
+function isVisit(value: unknown): value is Visit {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && Number.isInteger(value.day) && Number(value.day) > 0
+    && Number.isInteger(value.order) && Number(value.order) >= 0
+    && typeof value.arrivalTime === "string"
+    && (value.durationMinutes === null || (Number.isInteger(value.durationMinutes) && Number(value.durationMinutes) > 0))
+}
+
+function isPlace(value: unknown): value is Place {
+  return isPlaceBase(value) && Array.isArray((value as Record<string, unknown>).visits)
+    && ((value as Record<string, unknown>).visits as unknown[]).every(isVisit)
 }
 
 function isTrip(value: unknown): value is Trip {
@@ -139,8 +173,44 @@ function loadPersistedData(): PersistedData {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (!raw) return createDefaultData()
     const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed)
-      || parsed.version !== STORAGE_VERSION
+    if (!isRecord(parsed)) return createDefaultData()
+
+    if (parsed.version === 1 && Array.isArray(parsed.trips) && Array.isArray(parsed.trashedTrips)) {
+      const migrateTrip = (value: unknown): Trip | null => {
+        if (!isRecord(value) || !Array.isArray(value.places) || !value.places.every(isPlaceBase)) return null
+        const migrated = {
+          ...value,
+          places: value.places.map((rawPlace, index) => {
+            const place = rawPlace as Omit<Place, "visits">
+            return {
+              ...place,
+              visits: place.dayAssigned === null ? [] : [{
+                id: `v_migrated_${place.id}_${index}`,
+                day: place.dayAssigned,
+                order: place.order,
+                arrivalTime: "",
+                durationMinutes: null,
+              }],
+            }
+          }),
+        }
+        return isTrip(migrated) ? migrated : null
+      }
+      const trips = parsed.trips.map(migrateTrip)
+      const trashedTrips = parsed.trashedTrips.map(value => {
+        const trip = migrateTrip(value)
+        return trip && isRecord(value) && typeof value.trashedAt === "number" ? { ...trip, trashedAt: value.trashedAt } : null
+      })
+      if (trips.every(Boolean) && trashedTrips.every(Boolean) && typeof parsed.curTripId === "string") {
+        const profile = isRecord(parsed.profile) && typeof parsed.profile.displayName === "string" && parsed.profile.displayName.trim()
+          ? { displayName: parsed.profile.displayName.trim().slice(0, 20) }
+          : { ...DEFAULT_PROFILE }
+        return { version: STORAGE_VERSION, trips: trips as Trip[], trashedTrips: trashedTrips as TrashedTrip[], curTripId: parsed.curTripId, profile }
+      }
+      return createDefaultData()
+    }
+
+    if (parsed.version !== STORAGE_VERSION
       || !Array.isArray(parsed.trips)
       || !parsed.trips.every(isTrip)
       || !Array.isArray(parsed.trashedTrips)
@@ -190,9 +260,28 @@ const MOCK_LOCS = [
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const genId = () => `p_${Math.random().toString(36).slice(2, 8)}`
+const genVisitId = () => `v_${Math.random().toString(36).slice(2, 9)}`
 const getDayPlaces = (places: Place[], day: number) =>
-  places.filter(p => p.dayAssigned === day).sort((a, b) => a.order - b.order)
-const getPool = (places: Place[]) => places.filter(p => p.dayAssigned === null)
+  places.flatMap(place => place.visits
+    .filter(visit => visit.day === day)
+    .map(visit => ({ ...place, ...visit, placeId: place.id, visitId: visit.id } as DayPlace)))
+    .sort((a, b) => a.order - b.order)
+const getPool = (places: Place[]) => places.filter(p => p.visits.length === 0)
+const getVisit = (places: Place[], visitId: string) => {
+  for (const place of places) {
+    const visit = place.visits.find(item => item.id === visitId)
+    if (visit) return { place, visit }
+  }
+  return null
+}
+const visitTimeLabel = (visit: Pick<Visit, "arrivalTime" | "durationMinutes">) => {
+  if (!visit.arrivalTime) return ""
+  if (!visit.durationMinutes) return visit.arrivalTime
+  const [hours, minutes] = visit.arrivalTime.split(":").map(Number)
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return visit.arrivalTime
+  const end = hours * 60 + minutes + visit.durationMinutes
+  return `${visit.arrivalTime}—${String(Math.floor(end / 60) % 24).padStart(2, "0")}:${String(end % 60).padStart(2, "0")}`
+}
 
 function tripDateLabel(t: Trip): string {
   if (t.dateMode === "pending") return `日期暂定 · 共${t.days}天`
@@ -361,8 +450,8 @@ function TripListScreen({ trips, onSelect, onCreate, setDlg, onSoftDelete }:
         ) : (
           <div className="flex flex-col gap-3">
             {trips.map(trip => {
-              const assigned  = trip.places.filter(p => p.dayAssigned !== null).length
-              const pending   = trip.places.filter(p => p.dayAssigned === null).length
+              const assigned  = trip.places.reduce((sum, p) => sum + p.visits.length, 0)
+              const pending   = trip.places.filter(p => p.visits.length === 0).length
               return (
                 <div key={trip.id} className="bg-white rounded-2xl p-4 border border-[#EEE9DC] relative"
                   style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
@@ -443,8 +532,8 @@ function RecycleBinScreen({ trashedTrips, onRestore, onPermDelete, setDlg, onBac
           <p className="text-[12px] px-1 mt-1 mb-1" style={{ color: SEC }}>回收站中的旅行将在30天后自动永久删除</p>
           {trashedTrips.map(trip => {
             const days = daysUntilPerm(trip.trashedAt)
-            const assigned = trip.places.filter(p => p.dayAssigned !== null).length
-            const pending  = trip.places.filter(p => p.dayAssigned === null).length
+            const assigned = trip.places.reduce((sum, p) => sum + p.visits.length, 0)
+            const pending  = trip.places.filter(p => p.visits.length === 0).length
             return (
               <div key={trip.id} className="bg-white rounded-2xl p-4 border border-[#EEE9DC]"
                 style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
@@ -1164,10 +1253,40 @@ function PlacePoolTab({ trip, filter, setFilter, onAdd, onArrange, onActions, on
 
 // ─── Itinerary Tab ────────────────────────────────────────────────────────────
 
-function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReorder, onEnterReorder, onCancelReorder, onDoneReorder, expandedId, setExpandedId, onAddOptions, onActions, onMove, showToast }:
-  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (id: string) => void; onMove: (id: string, dir: "up" | "down") => void; showToast: (msg: string, undo?: () => void) => void }) {
+function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReorder, onEnterReorder, onCancelReorder, onDoneReorder, expandedId, setExpandedId, onAddOptions, onActions, onReorder, showToast }:
+  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (visitId: string) => void; onReorder: (visitId: string, targetVisitId: string) => void; showToast: (msg: string, undo?: () => void) => void }) {
   const dayPlaces  = getDayPlaces(trip.places, selectedDay)
   const hasAnyPlace = trip.places.length > 0
+  const [dragVisitId, setDragVisitId] = useState<string | null>(null)
+  const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
+  const swipeStart = useRef<{ x: number; y: number } | null>(null)
+
+  const changeDay = (nextDay: number) => {
+    if (nextDay < 1 || nextDay > trip.days || nextDay === selectedDay) return
+    setSlideDirection(nextDay > selectedDay ? "left" : "right")
+    setSelectedDay(nextDay)
+  }
+
+  const handleSwipeStart = (event: React.TouchEvent) => {
+    const touch = event.touches[0]
+    swipeStart.current = { x: touch.clientX, y: touch.clientY }
+  }
+  const handleSwipeEnd = (event: React.TouchEvent) => {
+    if (!swipeStart.current || isReorder) return
+    const touch = event.changedTouches[0]
+    const dx = touch.clientX - swipeStart.current.x
+    const dy = touch.clientY - swipeStart.current.y
+    swipeStart.current = null
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.4) return
+    changeDay(dx < 0 ? selectedDay + 1 : selectedDay - 1)
+  }
+
+  const handleDragMove = (event: React.PointerEvent) => {
+    if (!dragVisitId) return
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-visit-id]")
+    const targetId = target?.dataset.visitId
+    if (targetId && targetId !== dragVisitId) onReorder(dragVisitId, targetId)
+  }
 
   if (!hasAnyPlace) {
     return (
@@ -1191,23 +1310,24 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           <button onClick={onDoneReorder} className="text-[15px] font-semibold text-[#C8A200] px-1">完成</button>
         </div>
         <div className="flex-1 overflow-y-auto px-4 py-3" style={{ scrollbarWidth: "none" }}>
-          {dayPlaces.map((place, idx) => (
-            <div key={place.id} className="flex items-center gap-3 bg-white rounded-2xl px-4 py-3.5 mb-2" style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
-              <GripVertical size={20} style={{ color: "#C8C4BC" }} className="shrink-0" />
+          {dayPlaces.map(place => (
+            <div key={place.visitId} data-visit-id={place.visitId}
+              className={`flex items-center gap-3 bg-white rounded-2xl px-4 py-3.5 mb-2 transition-all ${dragVisitId === place.visitId ? "scale-[1.02] shadow-lg opacity-90" : ""}`}
+              style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
+              <button type="button" aria-label={`拖动${place.name}调整顺序`}
+                onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); setDragVisitId(place.visitId) }}
+                onPointerMove={handleDragMove}
+                onPointerUp={event => { event.currentTarget.releasePointerCapture(event.pointerId); setDragVisitId(null) }}
+                onPointerCancel={() => setDragVisitId(null)}
+                className="w-11 h-11 -ml-2 flex items-center justify-center shrink-0 cursor-grab active:cursor-grabbing"
+                style={{ touchAction: "none", color: "#C8C4BC" }}>
+                <GripVertical size={22} />
+              </button>
               <div className="flex-1 min-w-0">
                 <p className="text-[15px] font-medium text-[#2B2924] truncate">{place.name}</p>
-                <p className="text-[12px]" style={{ color: SEC }}>{TYPE_LABEL[place.type]}</p>
+                <p className="text-[12px]" style={{ color: SEC }}>{visitTimeLabel(place) || TYPE_LABEL[place.type]}</p>
               </div>
-              <div className="flex flex-col gap-1 shrink-0">
-                <button onClick={() => onMove(place.id, "up")} disabled={idx === 0}
-                  className="w-8 h-7 rounded-lg bg-[#EEE9DC] flex items-center justify-center disabled:opacity-30 active:bg-[#DDD8CC]">
-                  <ChevronUp size={14} className="text-[#2B2924]" />
-                </button>
-                <button onClick={() => onMove(place.id, "down")} disabled={idx === dayPlaces.length - 1}
-                  className="w-8 h-7 rounded-lg bg-[#EEE9DC] flex items-center justify-center disabled:opacity-30 active:bg-[#DDD8CC]">
-                  <ChevronDown size={14} className="text-[#2B2924]" />
-                </button>
-              </div>
+              <span className="text-[11px]" style={{ color: TERC }}>长按拖动</span>
             </div>
           ))}
         </div>
@@ -1216,11 +1336,12 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" onTouchStart={handleSwipeStart} onTouchEnd={handleSwipeEnd}>
+      <style>{`@keyframes tripflowDayInLeft{from{opacity:.45;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}@keyframes tripflowDayInRight{from{opacity:.45;transform:translateX(-18px)}to{opacity:1;transform:translateX(0)}}`}</style>
       <div className="overflow-x-auto shrink-0 px-4 pt-2 pb-2" style={{ scrollbarWidth: "none" }}>
         <div className="flex gap-2">
           {Array.from({ length: trip.days }, (_, i) => i + 1).map(day => (
-            <button key={day} onClick={() => setSelectedDay(day)}
+            <button key={day} onClick={() => changeDay(day)}
               className={`shrink-0 px-4 h-9 rounded-full text-[13px] font-medium transition-colors ${selectedDay === day ? "bg-[#F8DF72] text-[#2B2924]" : "bg-white border border-[#EEE9DC]"}`}
               style={{ color: selectedDay === day ? "#2B2924" : SEC }}>
               第{day}天{dayDateSuffix(trip, day).replace(" · ", "")}
@@ -1248,23 +1369,25 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           )}
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 pb-2" style={{ scrollbarWidth: "none" }}>
+      <div key={selectedDay} className="flex-1 overflow-y-auto px-4 pb-2"
+        style={{ scrollbarWidth: "none", animation: `${slideDirection === "left" ? "tripflowDayInLeft" : "tripflowDayInRight"} 180ms ease-out` }}>
         {dayPlaces.length === 0 ? (
           <Empty icon={CalendarDays} title="这一天还没有安排" desc="从待安排地点选择，或新建一个地点" action={{ label: "从待安排地点选择", onClick: onAddOptions }} />
         ) : view === "normal" ? (
           <div>
             {dayPlaces.map((place, idx) => (
-              <div key={place.id}>
+              <div key={place.visitId}>
                 <div className="bg-white rounded-2xl px-4 py-3.5 flex items-start gap-3" style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.06)" }}>
                   <div className="w-8 h-8 rounded-full bg-[#F8DF72] flex items-center justify-center shrink-0 mt-0.5">
                     <span className="text-[13px] font-bold text-[#2B2924]">{idx + 1}</span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-[15px] font-semibold text-[#2B2924]">{place.name}</p>
+                    {visitTimeLabel(place) && <p className="text-[13px] font-semibold mt-0.5 text-[#8A7200]">{visitTimeLabel(place)}</p>}
                     <p className="text-[12px] mt-0.5" style={{ color: SEC }}>{TYPE_LABEL[place.type]}{place.note ? ` · ${place.note}` : ""}</p>
                     {place.address && <p className="text-[11px] mt-0.5 truncate" style={{ color: "#C8C4BC" }}>{place.address}</p>}
                   </div>
-                  <button onClick={() => onActions(place.id)}
+                  <button onClick={() => onActions(place.visitId)}
                     className="w-11 h-11 flex items-center justify-center shrink-0 -mr-2 -mt-1">
                     <MoreHorizontal size={17} style={{ color: TERC }} />
                   </button>
@@ -1278,20 +1401,21 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
         ) : (
           <div className="flex flex-col gap-1.5">
             {dayPlaces.map((place, idx) => (
-              <div key={place.id}>
+              <div key={place.visitId}>
                 <button className="w-full bg-white rounded-2xl px-4 py-3 flex items-center gap-3 active:bg-[#FFFCF3]"
                   style={{ boxShadow: "0 1px 4px rgba(43,41,36,0.05)" }}
-                  onClick={() => setExpandedId(expandedId === place.id ? null : place.id)}>
+                  onClick={() => setExpandedId(expandedId === place.visitId ? null : place.visitId)}>
                   <div className="w-6 h-6 rounded-full bg-[#F8DF72] flex items-center justify-center shrink-0">
                     <span className="text-[11px] font-bold text-[#2B2924]">{idx + 1}</span>
                   </div>
                   <span className="flex-1 text-left text-[14px] font-medium text-[#2B2924] truncate">{place.name}</span>
-                  <button onClick={e => { e.stopPropagation(); onActions(place.id) }}
+                  {place.arrivalTime && <span className="text-[11px] font-semibold text-[#8A7200]">{visitTimeLabel(place)}</span>}
+                  <button onClick={e => { e.stopPropagation(); onActions(place.visitId) }}
                     className="w-11 h-11 flex items-center justify-center -mr-2">
                     <MoreHorizontal size={14} style={{ color: TERC }} />
                   </button>
                 </button>
-                {expandedId === place.id && (
+                {expandedId === place.visitId && (
                   <div className="mx-3 px-4 pt-3 pb-3 bg-[#FFFCF3] rounded-b-xl border-x border-b border-[#EEE9DC] -mt-2">
                     <p className="text-[12px]" style={{ color: SEC }}>{TYPE_LABEL[place.type]}{place.note ? ` · ${place.note}` : ""}</p>
                     {place.address && <p className="text-[11px] mt-0.5" style={{ color: "#C8C4BC" }}>{place.address}</p>}
@@ -1317,13 +1441,13 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
 
 function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, selectedId, setSelectedId }:
   { trip: Trip; filter: "all" | "pool" | number; setFilter: (f: "all" | "pool" | number) => void; listOpen: boolean; setListOpen: (v: boolean) => void; onMarker: (id: string) => void; selectedId: string | null; setSelectedId: (id: string | null) => void }) {
-  const daysWithPlaces = [...new Set(trip.places.filter(p => p.dayAssigned !== null).map(p => p.dayAssigned as number))].sort()
+  const daysWithPlaces = [...new Set(trip.places.flatMap(p => p.visits.map(v => v.day)))].sort((a, b) => a - b)
   const filterOpts = [
     { key: "all"  as const, label: "全部" },
     { key: "pool" as const, label: "待安排" },
     ...daysWithPlaces.map(d => ({ key: d as number, label: `第${d}天` }))
   ]
-  const visible = (p: Place) => filter === "all" || (filter === "pool" && p.dayAssigned === null) || (typeof filter === "number" && p.dayAssigned === filter)
+  const visible = (p: Place) => filter === "all" || (filter === "pool" && p.visits.length === 0) || (typeof filter === "number" && p.visits.some(v => v.day === filter))
 
   const visiblePlaces = trip.places.filter(visible)
   let barLabel = ""
@@ -1381,7 +1505,8 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
         {trip.places.map(place => {
           const dim   = !visible(place)
           const isSel = selectedId === place.id
-          const isPool = place.dayAssigned === null
+          const isPool = place.visits.length === 0
+          const scheduledDays = [...new Set(place.visits.map(v => v.day))].sort((a, b) => a - b)
           return (
             <g key={place.id} onClick={e => { e.stopPropagation(); setSelectedId(place.id); onMarker(place.id) }}
               style={{ cursor: "pointer", opacity: dim ? 0.18 : 1, transition: "opacity 0.2s" }}>
@@ -1400,7 +1525,7 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
                   <text x={place.coords.x} y={place.coords.y} textAnchor="middle" dominantBaseline="central"
                     fontSize="10" fontWeight="700" fill="#2B2924"
                     style={{ userSelect: "none", fontFamily: "Plus Jakarta Sans, sans-serif" }}>
-                    {place.dayAssigned}
+                    {scheduledDays.length > 1 ? "·" : scheduledDays[0]}
                   </text>
                 </>
               )}
@@ -1447,9 +1572,9 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
               {visiblePlaces.map(p => (
                 <button key={p.id} onClick={() => { setSelectedId(p.id); setListOpen(false) }}
                   className="w-full flex items-center gap-3 px-4 py-2.5 active:bg-[#FFFCF3] border-b border-[#EEE9DC] last:border-0">
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${p.dayAssigned ? "bg-[#F8DF72]" : "bg-[#EEE9DC]"}`}>
-                    {p.dayAssigned
-                      ? <span className="text-[10px] font-bold text-[#2B2924]">{p.dayAssigned}</span>
+                  <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${p.visits.length ? "bg-[#F8DF72]" : "bg-[#EEE9DC]"}`}>
+                    {p.visits.length
+                      ? <span className="text-[10px] font-bold text-[#2B2924]">{p.visits.length > 1 ? p.visits.length : p.visits[0].day}</span>
                       : <div className="w-2 h-2 rounded-full bg-[#A9A69F]" />}
                   </div>
                   <span className="flex-1 text-left text-[13px] text-[#2B2924] truncate">{p.name}</span>
@@ -1519,8 +1644,10 @@ export default function App() {
   const [addForm,      setAddForm]      = useState({ name: "", type: "attraction" as PlaceType, note: "", address: "" })
   const [createForm,   setCreateForm]   = useState({ name: "", dest: "", dateMode: "pending" as DateMode, days: 7, startDate: "" })
 
-  const [dayPicker,    setDayPicker]    = useState({ open: false, placeId: "", selectedDay: null as number | null, mode: "arrange" as DayPickerMode })
+  const [dayPicker,    setDayPicker]    = useState({ open: false, placeId: "", visitId: "", selectedDay: null as number | null, mode: "arrange" as DayPickerMode })
   const [placeAct,     setPlaceAct]     = useState({ open: false, id: "", source: "itinerary" as "itinerary" | "pool" })
+  const [timeEditor,   setTimeEditor]   = useState({ open: false, visitId: "", arrivalTime: "", durationMinutes: null as number | null })
+  const [scheduleListPlaceId, setScheduleListPlaceId] = useState<string | null>(null)
   const [mapSum,       setMapSum]       = useState({ open: false, id: "" })
   const [extMapPlaceId, setExtMapPlaceId] = useState<string | null>(null)
   const [addOpts,      setAddOpts]      = useState(false)
@@ -1555,24 +1682,41 @@ export default function App() {
   const assignPlace = (placeId: string, day: number) => {
     const place = trip?.places.find(p => p.id === placeId)
     if (!place) return
-    const prevDay = place.dayAssigned; const prevOrder = place.order
     const cnt = getDayPlaces(trip!.places, day).length
-    const isMove = prevDay !== null
-    updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, dayAssigned: day, order: cnt + 1 } : p) }))
-    const msg = isMove ? `已将${place.name}移动到第${day}天` : `已将${place.name}安排到第${day}天`
-    showToast(msg, () => {
-      updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, dayAssigned: prevDay, order: prevOrder } : p) }))
+    const visit: Visit = { id: genVisitId(), day, order: cnt + 1, arrivalTime: "", durationMinutes: null }
+    updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, visits: [...p.visits, visit] } : p) }))
+    showToast(`已将${place.name}安排到第${day}天`, () => {
+      updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, visits: p.visits.filter(v => v.id !== visit.id) } : p) }))
     })
   }
 
-  const returnToPool = (placeId: string) => {
-    const place = trip?.places.find(p => p.id === placeId)
-    if (!place) return
-    const prevDay = place.dayAssigned; const prevOrder = place.order
-    updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, dayAssigned: null, order: 0 } : p) }))
-    showToast(`已将${place.name}移回待安排地点`, () => {
-      updateTrip(t => ({ ...t, places: t.places.map(p => p.id === placeId ? { ...p, dayAssigned: prevDay, order: prevOrder } : p) }))
+  const moveVisitToDay = (visitId: string, day: number) => {
+    const found = trip ? getVisit(trip.places, visitId) : null
+    if (!found) return
+    const previous = { ...found.visit }
+    const order = getDayPlaces(trip!.places, day).length + 1
+    updateTrip(t => ({ ...t, places: t.places.map(p => ({ ...p, visits: p.visits.map(v => v.id === visitId ? { ...v, day, order } : v) })) }))
+    showToast(`已将${found.place.name}移动到第${day}天`, () => {
+      updateTrip(t => ({ ...t, places: t.places.map(p => ({ ...p, visits: p.visits.map(v => v.id === visitId ? previous : v) })) }))
     })
+  }
+
+  const deleteVisit = (visitId: string) => {
+    const found = trip ? getVisit(trip.places, visitId) : null
+    if (!found) return
+    updateTrip(t => ({ ...t, places: t.places.map(p => ({ ...p, visits: p.visits.filter(v => v.id !== visitId) })) }))
+    showToast(`已删除${found.place.name}的本次安排`)
+  }
+
+  const updateVisitTiming = (visitId: string, arrivalTime: string, durationMinutes: number | null) => {
+    updateTrip(t => ({
+      ...t,
+      places: t.places.map(p => ({
+        ...p,
+        visits: p.visits.map(v => v.id === visitId ? { ...v, arrivalTime, durationMinutes } : v),
+      })),
+    }))
+    showToast("到达时间与停留时长已保存")
   }
 
   const deletePlace = (placeId: string) => {
@@ -1580,19 +1724,26 @@ export default function App() {
     showToast("地点已删除")
   }
 
-  const movePlaceInDay = (placeId: string, dir: "up" | "down") => {
+  const reorderVisit = (visitId: string, targetVisitId: string) => {
+    if (visitId === targetVisitId) return
     updateTrip(t => {
-      const dayPs  = getDayPlaces(t.places, t.places.find(p => p.id === placeId)?.dayAssigned || 1)
-      const idx    = dayPs.findIndex(p => p.id === placeId)
-      const newIdx = dir === "up" ? idx - 1 : idx + 1
-      if (newIdx < 0 || newIdx >= dayPs.length) return t
-      const swap = dayPs[newIdx]
-      return { ...t, places: t.places.map(p => p.id === placeId ? { ...p, order: swap.order } : p.id === swap.id ? { ...p, order: dayPs[idx].order } : p) }
+      const source = getVisit(t.places, visitId)
+      const target = getVisit(t.places, targetVisitId)
+      if (!source || !target || source.visit.day !== target.visit.day) return t
+      const dayVisits = getDayPlaces(t.places, source.visit.day)
+      const sourceIndex = dayVisits.findIndex(item => item.visitId === visitId)
+      const targetIndex = dayVisits.findIndex(item => item.visitId === targetVisitId)
+      if (sourceIndex < 0 || targetIndex < 0) return t
+      const reordered = [...dayVisits]
+      const [moved] = reordered.splice(sourceIndex, 1)
+      reordered.splice(targetIndex, 0, moved)
+      const orderMap = new Map(reordered.map((item, index) => [item.visitId, index + 1]))
+      return { ...t, places: t.places.map(p => ({ ...p, visits: p.visits.map(v => orderMap.has(v.id) ? { ...v, order: orderMap.get(v.id)! } : v) })) }
     })
   }
 
   const enterReorder = () => {
-    if (trip) setReorderSnap(trip.places.map(p => ({ ...p })))
+    if (trip) setReorderSnap(trip.places.map(p => ({ ...p, visits: p.visits.map(v => ({ ...v })) })))
     setIsReorder(true)
   }
   const cancelReorder = () => {
@@ -1613,7 +1764,7 @@ export default function App() {
       updateTrip(t => ({ ...t, places: t.places.map(p => p.id === editingId ? { ...p, ...form } : p) }))
       showToast("地点已更新")
     } else {
-      const np: Place = { id: genId(), ...form, dayAssigned: null, order: 0, coords: { x: 170 + Math.random() * 50, y: 150 + Math.random() * 50 } }
+      const np: Place = { id: genId(), ...form, dayAssigned: null, order: 0, visits: [], coords: { x: 170 + Math.random() * 50, y: 150 + Math.random() * 50 } }
       updateTrip(t => ({ ...t, places: [np, ...t.places] }))
       showToast(`${form.name}已添加到待安排地点`)
     }
@@ -1669,11 +1820,9 @@ export default function App() {
     if (!trip || trip.days <= 1) return
     updateTrip(t => ({
       ...t, days: t.days - 1,
-      places: t.places.map(p => {
-        if (p.dayAssigned === day)                               return { ...p, dayAssigned: null, order: 0 }
-        if (p.dayAssigned !== null && p.dayAssigned > day)      return { ...p, dayAssigned: p.dayAssigned - 1 }
-        return p
-      })
+      places: t.places.map(p => ({ ...p, visits: p.visits
+        .filter(v => v.day !== day)
+        .map(v => v.day > day ? { ...v, day: v.day - 1 } : v) }))
     }))
     if (selectedDay > (trip?.days || 1) - 1) setSelectedDay(Math.max(1, (trip?.days || 1) - 1))
   }
@@ -1685,8 +1834,15 @@ export default function App() {
     setEditingId(id); setAddForm({ name: p.name, type: p.type, note: p.note, address: p.address }); setScreen("add-place")
   }
 
-  const actPlace  = placeAct.id  ? trip?.places.find(p => p.id === placeAct.id)  : null
+  const activeVisitInfo = placeAct.source === "itinerary" && placeAct.id && trip
+    ? getVisit(trip.places, placeAct.id)
+    : null
+  const actVisit = activeVisitInfo?.visit || null
+  const actPlace = placeAct.source === "itinerary"
+    ? activeVisitInfo?.place || null
+    : placeAct.id ? trip?.places.find(p => p.id === placeAct.id) || null : null
   const mapPlace  = mapSum.id    ? trip?.places.find(p => p.id === mapSum.id)     : null
+  const scheduleListPlace = scheduleListPlaceId ? trip?.places.find(p => p.id === scheduleListPlaceId) || null : null
   const pool      = trip ? getPool(trip.places) : []
 
   const toastBottom = screen === "workspace" ? (isReorder ? 100 : 100) : 96
@@ -1775,7 +1931,7 @@ export default function App() {
               {wsTab === "pool" && (
                 <PlacePoolTab trip={trip} filter={poolFilter} setFilter={setPoolFilter}
                   onAdd={openAddPlace}
-                  onArrange={id => setDayPicker({ open: true, placeId: id, selectedDay: null, mode: "arrange" })}
+                  onArrange={id => setDayPicker({ open: true, placeId: id, visitId: "", selectedDay: null, mode: "arrange" })}
                   onActions={id => setPlaceAct({ open: true, id, source: "pool" })}
                   onEdit={openEditPlace}
                   onViewItinerary={() => setWsTab("itinerary")} />
@@ -1787,7 +1943,7 @@ export default function App() {
                   expandedId={expandedId} setExpandedId={setExpandedId}
                   onAddOptions={() => setAddOpts(true)}
                   onActions={id => setPlaceAct({ open: true, id, source: "itinerary" })}
-                  onMove={movePlaceInDay} showToast={showToast} />
+                  onReorder={reorderVisit} showToast={showToast} />
               )}
               {wsTab === "map" && (
                 <MapTab trip={trip} filter={mapFilter} setFilter={setMapFilter}
@@ -1818,12 +1974,13 @@ export default function App() {
 
         {/* ── Day Picker Sheet ────────────────────────────────────── */}
         <Sheet open={dayPicker.open} onClose={() => setDayPicker(d => ({ ...d, open: false }))}
-          title={dayPicker.mode === "arrange" ? "安排到哪一天？" : "移动到哪一天？"}>
+          title={dayPicker.mode === "move" ? "移动到哪一天？" : dayPicker.mode === "repeat" ? "再安排到哪一天？" : "安排到哪一天？"}>
           <div className="px-4 pb-6">
             {Array.from({ length: trip?.days || 0 }, (_, i) => i + 1).map(day => {
               const cnt     = getDayPlaces(trip?.places || [], day).length
               const sel     = dayPicker.selectedDay === day
-              const isCurr  = dayPicker.mode === "move" && trip?.places.find(p => p.id === dayPicker.placeId)?.dayAssigned === day
+              const currentVisit = dayPicker.mode === "move" && trip ? getVisit(trip.places, dayPicker.visitId) : null
+              const isCurr  = dayPicker.mode === "move" && currentVisit?.visit.day === day
               return (
                 <button key={day}
                   onClick={() => !isCurr && setDayPicker(d => ({ ...d, selectedDay: day }))}
@@ -1845,11 +2002,12 @@ export default function App() {
             <Btn variant="primary" className="w-full mt-2" disabled={dayPicker.selectedDay === null}
               onClick={() => {
                 if (dayPicker.selectedDay && dayPicker.placeId) {
-                  assignPlace(dayPicker.placeId, dayPicker.selectedDay)
+                  if (dayPicker.mode === "move" && dayPicker.visitId) moveVisitToDay(dayPicker.visitId, dayPicker.selectedDay)
+                  else assignPlace(dayPicker.placeId, dayPicker.selectedDay)
                   setDayPicker(d => ({ ...d, open: false }))
                 }
               }}>
-              {dayPicker.mode === "arrange" ? "确认安排" : "确认移动"}
+              {dayPicker.mode === "move" ? "确认移动" : dayPicker.mode === "repeat" ? "确认再次安排" : "确认安排"}
             </Btn>
           </div>
         </Sheet>
@@ -1857,15 +2015,17 @@ export default function App() {
         {/* ── Itinerary Place Actions Sheet ───────────────────────── */}
         {placeAct.source === "itinerary" && (
           <Sheet open={placeAct.open} onClose={() => setPlaceAct(a => ({ ...a, open: false }))}>
-            {actPlace && (
+            {actPlace && actVisit && (
               <div className="pb-6">
                 <div className="px-5 pb-3 border-b border-[#EEE9DC]">
                   <p className="text-[16px] font-semibold text-[#2B2924]">{actPlace.name}</p>
-                  <p className="text-[12px]" style={{ color: SEC }}>当前安排：第{actPlace.dayAssigned}天</p>
+                  <p className="text-[12px]" style={{ color: SEC }}>当前安排：第{actVisit.day}天{visitTimeLabel({ ...actPlace, ...actVisit, placeId: actPlace.id, visitId: actVisit.id }) ? ` · ${visitTimeLabel({ ...actPlace, ...actVisit, placeId: actPlace.id, visitId: actVisit.id })}` : ""}</p>
                 </div>
                 {[
-                  { label: "移动到其他日期", icon: ChevronRight, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, selectedDay: actPlace.dayAssigned, mode: "move" }) } },
-                  { label: "移回待安排地点", icon: RotateCcw,    fn: () => { setPlaceAct(a => ({ ...a, open: false })); returnToPool(actPlace.id) } },
+                  { label: "安排到其他日期", icon: ChevronRight, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, visitId: actVisit.id, selectedDay: actVisit.day, mode: "move" }) } },
+                  { label: "再安排一次", icon: Plus, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setDayPicker({ open: true, placeId: actPlace.id, visitId: "", selectedDay: null, mode: "repeat" }) } },
+                  { label: "设置到达时间与停留时长", icon: Clock3, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setTimeEditor({ open: true, visitId: actVisit.id, arrivalTime: actVisit.arrivalTime, durationMinutes: actVisit.durationMinutes }) } },
+                  { label: "查看全部安排", icon: CalendarDays, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setScheduleListPlaceId(actPlace.id) } },
                   { label: "编辑地点",       icon: Edit3,        fn: () => { setPlaceAct(a => ({ ...a, open: false })); openEditPlace(actPlace.id) } },
                   { label: "在高德/百度地图中查看", icon: Navigation2, fn: () => { setPlaceAct(a => ({ ...a, open: false })); setExtMapPlaceId(actPlace.id) } },
                 ].map(({ label, icon: Icon, fn }) => (
@@ -1875,10 +2035,15 @@ export default function App() {
                   </button>
                 ))}
                 <div className="mx-5 h-px bg-[#EEE9DC] my-1" />
-                <button onClick={() => { setPlaceAct(a => ({ ...a, open: false })); setDlg({ title: `确定删除${actPlace.name}吗？`, desc: "删除后，它会从行程和地图中同时移除。", onConfirm: () => deletePlace(actPlace.id) }) }}
+                <button onClick={() => { setPlaceAct(a => ({ ...a, open: false })); setDlg({ title: `删除${actPlace.name}的本次安排？`, desc: `只删除第${actVisit.day}天的这一次安排，地点本身和其他日期的安排会保留。`, onConfirm: () => deleteVisit(actVisit.id) }) }}
                   className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3]">
                   <Trash2 size={17} strokeWidth={1.5} className="text-[#C96B58]" />
-                  <span className="text-[15px] text-[#C96B58]">删除地点</span>
+                  <span className="text-[15px] text-[#C96B58]">删除本次安排</span>
+                </button>
+                <button onClick={() => { setPlaceAct(a => ({ ...a, open: false })); setDlg({ title: `从地点池彻底删除${actPlace.name}？`, desc: `地点本身及全部${actPlace.visits.length}次行程安排都会删除，此操作不可撤销。`, onConfirm: () => deletePlace(actPlace.id) }) }}
+                  className="w-full flex items-center gap-4 px-5 py-4 active:bg-[#FFFCF3]">
+                  <Trash2 size={17} strokeWidth={1.5} className="text-[#A84E3D]" />
+                  <span className="text-[15px] text-[#A84E3D]">从地点池彻底删除</span>
                 </button>
               </div>
             )}
@@ -1914,6 +2079,62 @@ export default function App() {
           </Sheet>
         )}
 
+        {/* ── Visit time editor ─────────────────────────────────── */}
+        <Sheet open={timeEditor.open} onClose={() => setTimeEditor(v => ({ ...v, open: false }))} title="到达时间与停留时长">
+          <div className="px-5 pb-7">
+            <label className="block text-[13px] font-medium text-[#2B2924] mb-2">到达时间（选填）</label>
+            <input type="time" value={timeEditor.arrivalTime}
+              onChange={event => setTimeEditor(v => ({ ...v, arrivalTime: event.target.value }))}
+              className="w-full h-12 rounded-2xl border border-[#E5DFD0] bg-[#FFFCF3] px-4 text-[15px] text-[#2B2924] outline-none focus:border-[#E4C641] mb-5" />
+            <label className="block text-[13px] font-medium text-[#2B2924] mb-2">预计停留（选填）</label>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              {[30, 60, 120].map(minutes => (
+                <button key={minutes} type="button" onClick={() => setTimeEditor(v => ({ ...v, durationMinutes: minutes }))}
+                  className={`h-10 rounded-xl border text-[13px] font-medium ${timeEditor.durationMinutes === minutes ? "bg-[#F7E8AA] border-[#E4C641] text-[#2B2924]" : "bg-white border-[#E5DFD0]"}`}
+                  style={{ color: timeEditor.durationMinutes === minutes ? "#2B2924" : SEC }}>
+                  {minutes < 60 ? `${minutes}分钟` : `${minutes / 60}小时`}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 mb-6">
+              <input type="number" min="1" max="1440" inputMode="numeric" placeholder="自定义分钟数"
+                value={timeEditor.durationMinutes && ![30, 60, 120].includes(timeEditor.durationMinutes) ? timeEditor.durationMinutes : ""}
+                onChange={event => setTimeEditor(v => ({ ...v, durationMinutes: event.target.value ? Math.max(1, Number(event.target.value)) : null }))}
+                className="flex-1 h-11 rounded-xl border border-[#E5DFD0] bg-white px-3 text-[14px] outline-none focus:border-[#E4C641]" />
+              <button type="button" onClick={() => setTimeEditor(v => ({ ...v, durationMinutes: null }))}
+                className="h-11 px-3 rounded-xl border border-[#E5DFD0] bg-white text-[13px]" style={{ color: SEC }}>不设置</button>
+            </div>
+            <Btn variant="primary" className="w-full" onClick={() => {
+              updateVisitTiming(timeEditor.visitId, timeEditor.arrivalTime, timeEditor.durationMinutes)
+              setTimeEditor(v => ({ ...v, open: false }))
+            }}>保存</Btn>
+          </div>
+        </Sheet>
+
+        {/* ── All schedules for one place ───────────────────────── */}
+        <Sheet open={scheduleListPlaceId !== null} onClose={() => setScheduleListPlaceId(null)} title="全部安排">
+          {scheduleListPlace && (
+            <div className="px-5 pb-7">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-2xl flex items-center justify-center" style={{ background: TYPE_BG[scheduleListPlace.type] }}>
+                  <TIcon type={scheduleListPlace.type} size={18} />
+                </div>
+                <div><p className="text-[16px] font-semibold text-[#2B2924]">{scheduleListPlace.name}</p><p className="text-[12px]" style={{ color: SEC }}>共 {scheduleListPlace.visits.length} 次安排</p></div>
+              </div>
+              <div className="flex flex-col gap-2 mb-4">
+                {scheduleListPlace.visits.slice().sort((a, b) => a.day - b.day || a.order - b.order).map(visit => (
+                  <div key={visit.id} className="bg-[#FFFCF3] border border-[#EEE9DC] rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
+                    <div><p className="text-[14px] font-medium text-[#2B2924]">第{visit.day}天</p><p className="text-[12px]" style={{ color: SEC }}>{visitTimeLabel({ ...scheduleListPlace, ...visit, placeId: scheduleListPlace.id, visitId: visit.id }) || "未设置到达时间"}</p></div>
+                    <button className="text-[12px] px-3 h-8 rounded-xl border border-[#E5DFD0] bg-white" style={{ color: SEC }}
+                      onClick={() => { setScheduleListPlaceId(null); setTimeEditor({ open: true, visitId: visit.id, arrivalTime: visit.arrivalTime, durationMinutes: visit.durationMinutes }) }}>编辑时间</button>
+                  </div>
+                ))}
+              </div>
+              <Btn variant="secondary" className="w-full" onClick={() => { setScheduleListPlaceId(null); setDayPicker({ open: true, placeId: scheduleListPlace.id, visitId: "", selectedDay: null, mode: "repeat" }) }}><Plus size={15} /> 再安排一次</Btn>
+            </div>
+          )}
+        </Sheet>
+
         {/* ── Map Place Summary Sheet ─────────────────────────────── */}
         <Sheet open={mapSum.open} onClose={() => setMapSum(m => ({ ...m, open: false }))}>
           {mapPlace && (
@@ -1923,15 +2144,15 @@ export default function App() {
               {mapPlace.address && <p className="text-[13px] mb-1" style={{ color: SEC }}>{mapPlace.address}</p>}
               {mapPlace.note    && <p className="text-[13px] mb-1" style={{ color: SEC }}>备注：{mapPlace.note}</p>}
               <p className="text-[13px] mb-5" style={{ color: TERC }}>
-                当前状态：{mapPlace.dayAssigned ? `第${mapPlace.dayAssigned}天` : "待安排地点"}
+                当前状态：{mapPlace.visits.length > 0 ? mapPlace.visits.slice().sort((a, b) => a.day - b.day).map(v => `第${v.day}天`).join("、") : "待安排地点"}
               </p>
               <div className="flex gap-2.5">
                 <Btn variant="primary" className="flex-1 text-[14px]"
                   onClick={() => {
                     setMapSum(m => ({ ...m, open: false }))
-                    setDayPicker({ open: true, placeId: mapPlace.id, selectedDay: mapPlace.dayAssigned, mode: mapPlace.dayAssigned ? "move" : "arrange" })
+                    setDayPicker({ open: true, placeId: mapPlace.id, visitId: "", selectedDay: null, mode: mapPlace.visits.length > 0 ? "repeat" : "arrange" })
                   }}>
-                  {mapPlace.dayAssigned ? "移动到其他日期" : "安排到某一天"}
+                  {mapPlace.visits.length > 0 ? "再安排一次" : "安排到某一天"}
                 </Btn>
                 <Btn variant="secondary" className="text-[14px] px-4"
                   onClick={() => { setMapSum(m => ({ ...m, open: false })); setExtMapPlaceId(mapPlace.id) }}>
