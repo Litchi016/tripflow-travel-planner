@@ -6,7 +6,8 @@ import {
   ChevronUp, ChevronDown, Search, Trash2, Edit3,
   Navigation2, CheckCircle2, Map as MapIcon,
   RotateCcw, ChevronRight, AlertCircle, Clock3,
-  User, Bell, Globe, Sun, Shield, HelpCircle, Info, MessageSquare
+  User, Bell, Globe, Sun, Shield, HelpCircle, Info, MessageSquare,
+  NotebookPen, ListChecks, FileText, Luggage, ClipboardCheck
 } from "lucide-react"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -14,10 +15,18 @@ import {
 type PlaceType = "attraction" | "restaurant" | "hotel" | "transport" | "other"
 type DateMode = "pending" | "confirmed"
 type Screen = "list" | "create" | "workspace" | "add-place" | "settings"
-type WsTab = "pool" | "itinerary" | "map"
+type WsTab = "pool" | "itinerary" | "map" | "memo"
 type ItvView = "normal" | "compact"
 type GlobalTab = "trips" | "profile"
 type DayPickerMode = "arrange" | "repeat" | "move"
+type MemoType = "text" | "checklist"
+type MemoCategory = "preparation" | "packing" | "food" | "other"
+
+interface ChecklistItem { id: string; text: string; completed: boolean }
+interface TripMemo {
+  id: string; category: MemoCategory; type: MemoType; title: string
+  content: string; items: ChecklistItem[]; updatedAt: number
+}
 
 interface Visit {
   id: string
@@ -35,7 +44,7 @@ interface Place {
 }
 interface Trip {
   id: string; name: string; destination: string
-  dateMode: DateMode; days: number; startDate: string; places: Place[]
+  dateMode: DateMode; days: number; startDate: string; places: Place[]; memos: TripMemo[]
 }
 type DayPlace = Place & Visit & { placeId: string; visitId: string }
 interface TrashedTrip extends Trip { trashedAt: number }
@@ -57,6 +66,12 @@ const TYPE_COLOR: Record<PlaceType, string> = {
 }
 const SEC = "#6F6A61"
 const TERC = "#A9A69F"
+const MEMO_CATEGORIES: { key: MemoCategory; label: string; desc: string; icon: typeof NotebookPen }[] = [
+  { key: "preparation", label: "行前准备", desc: "预约、证件与出发前事项", icon: ClipboardCheck },
+  { key: "packing", label: "行李清单", desc: "随身物品与打包检查", icon: Luggage },
+  { key: "food", label: "美食备忘", desc: "想吃的店和点单提示", icon: Utensils },
+  { key: "other", label: "其他笔记", desc: "其余旅行信息", icon: NotebookPen },
+]
 
 // ─── Initial Data ─────────────────────────────────────────────────────────────
 
@@ -86,13 +101,13 @@ const INIT_PLACES: Place[] = LEGACY_INIT_PLACES.map(place => ({
     durationMinutes: null,
   }],
 }))
-const INIT_TRIP: Trip = { id: "t1", name: "北京7日游", destination: "北京", dateMode: "pending", days: 7, startDate: "", places: INIT_PLACES }
+const INIT_TRIP: Trip = { id: "t1", name: "北京7日游", destination: "北京", dateMode: "pending", days: 7, startDate: "", places: INIT_PLACES, memos: [] }
 
 const STORAGE_KEY = "tripflow.app-data"
-const STORAGE_VERSION = 2
+const STORAGE_VERSION = 3
 
 interface PersistedData {
-  version: 2
+  version: 3
   trips: Trip[]
   trashedTrips: TrashedTrip[]
   curTripId: string
@@ -104,6 +119,7 @@ const DEFAULT_PROFILE: UserProfile = { displayName: "旅行者" }
 const cloneTrip = (trip: Trip): Trip => ({
   ...trip,
   places: trip.places.map(place => ({ ...place, coords: { ...place.coords }, visits: place.visits.map(visit => ({ ...visit })) })),
+  memos: trip.memos.map(memo => ({ ...memo, items: memo.items.map(item => ({ ...item })) })),
 })
 
 const createDefaultData = (): PersistedData => ({
@@ -148,6 +164,17 @@ function isPlace(value: unknown): value is Place {
     && ((value as Record<string, unknown>).visits as unknown[]).every(isVisit)
 }
 
+function isTripMemo(value: unknown): value is TripMemo {
+  if (!isRecord(value) || !Array.isArray(value.items)) return false
+  const validCategory = ["preparation", "packing", "food", "other"].includes(String(value.category))
+  const validType = value.type === "text" || value.type === "checklist"
+  return typeof value.id === "string" && validCategory && validType
+    && typeof value.title === "string" && typeof value.content === "string"
+    && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
+    && value.items.every(item => isRecord(item) && typeof item.id === "string"
+      && typeof item.text === "string" && typeof item.completed === "boolean")
+}
+
 function isTrip(value: unknown): value is Trip {
   if (!isRecord(value)) return false
   return typeof value.id === "string"
@@ -160,6 +187,8 @@ function isTrip(value: unknown): value is Trip {
     && typeof value.startDate === "string"
     && Array.isArray(value.places)
     && value.places.every(isPlace)
+    && Array.isArray(value.memos)
+    && value.memos.every(isTripMemo)
 }
 
 function isTrashedTrip(value: unknown): value is TrashedTrip {
@@ -180,6 +209,7 @@ function loadPersistedData(): PersistedData {
         if (!isRecord(value) || !Array.isArray(value.places) || !value.places.every(isPlaceBase)) return null
         const migrated = {
           ...value,
+          memos: [],
           places: value.places.map((rawPlace, index) => {
             const place = rawPlace as Omit<Place, "visits">
             return {
@@ -199,6 +229,26 @@ function loadPersistedData(): PersistedData {
       const trips = parsed.trips.map(migrateTrip)
       const trashedTrips = parsed.trashedTrips.map(value => {
         const trip = migrateTrip(value)
+        return trip && isRecord(value) && typeof value.trashedAt === "number" ? { ...trip, trashedAt: value.trashedAt } : null
+      })
+      if (trips.every(Boolean) && trashedTrips.every(Boolean) && typeof parsed.curTripId === "string") {
+        const profile = isRecord(parsed.profile) && typeof parsed.profile.displayName === "string" && parsed.profile.displayName.trim()
+          ? { displayName: parsed.profile.displayName.trim().slice(0, 20) }
+          : { ...DEFAULT_PROFILE }
+        return { version: STORAGE_VERSION, trips: trips as Trip[], trashedTrips: trashedTrips as TrashedTrip[], curTripId: parsed.curTripId, profile }
+      }
+      return createDefaultData()
+    }
+
+    if (parsed.version === 2 && Array.isArray(parsed.trips) && Array.isArray(parsed.trashedTrips)) {
+      const addMemos = (value: unknown): Trip | null => {
+        if (!isRecord(value)) return null
+        const migrated = { ...value, memos: [] }
+        return isTrip(migrated) ? migrated : null
+      }
+      const trips = parsed.trips.map(addMemos)
+      const trashedTrips = parsed.trashedTrips.map(value => {
+        const trip = addMemos(value)
         return trip && isRecord(value) && typeof value.trashedAt === "number" ? { ...trip, trashedAt: value.trashedAt } : null
       })
       if (trips.every(Boolean) && trashedTrips.every(Boolean) && typeof parsed.curTripId === "string") {
@@ -261,6 +311,7 @@ const MOCK_LOCS = [
 
 const genId = () => `p_${Math.random().toString(36).slice(2, 8)}`
 const genVisitId = () => `v_${Math.random().toString(36).slice(2, 9)}`
+const genMemoId = (prefix = "m") => `${prefix}_${Math.random().toString(36).slice(2, 10)}`
 const getDayPlaces = (places: Place[], day: number) =>
   places.flatMap(place => place.visits
     .filter(visit => visit.day === day)
@@ -1258,7 +1309,6 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const dayPlaces  = getDayPlaces(trip.places, selectedDay)
   const hasAnyPlace = trip.places.length > 0
   const [dragVisitId, setDragVisitId] = useState<string | null>(null)
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [dragOverlay, setDragOverlay] = useState<{ top: number; left: number; width: number; height: number; offsetX: number; offsetY: number } | null>(null)
   const dragOverlayRef = useRef<typeof dragOverlay>(null)
   const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
@@ -1294,7 +1344,6 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const rect = slot.getBoundingClientRect()
     event.currentTarget.setPointerCapture(event.pointerId)
     lastDropTargetRef.current = null
-    setDropTargetId(null)
     setDragVisitId(visitId)
     const overlay = {
       top: rect.top, left: rect.left, width: rect.width, height: rect.height,
@@ -1316,7 +1365,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const nextOverlay = { ...currentOverlay, left: nextLeft, top: nextTop }
     dragOverlayRef.current = nextOverlay
     if (dragCardRef.current) {
-      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(0.82)`
+      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(0.94)`
     }
 
     const scrollArea = reorderScrollRef.current
@@ -1338,7 +1387,6 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const targetId = target?.dataset.visitId
     if (targetId && targetId !== lastDropTargetRef.current) {
       lastDropTargetRef.current = targetId
-      setDropTargetId(targetId)
       setDragOverlay(nextOverlay)
       onReorder(dragVisitId, targetId)
     }
@@ -1350,7 +1398,6 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     }
     lastDropTargetRef.current = null
-    setDropTargetId(null)
     dragOverlayRef.current = null
     setDragOverlay(null)
     setDragVisitId(null)
@@ -1383,24 +1430,18 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           {dayPlaces.map(place => {
             const isDragged = dragVisitId === place.visitId
             return (
-              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="relative mb-4"
+              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
                 style={isDragged && dragOverlay ? { height: dragOverlay.height } : undefined}>
-                {dragVisitId && dropTargetId === place.visitId && !isDragged && (
-                  <div className="absolute -top-2.5 left-2 right-2 h-1 rounded-full bg-[#E4C641] z-10 shadow-[0_1px_5px_rgba(200,162,0,0.35)]">
-                    <span className="absolute -left-1 -top-1 w-3 h-3 rounded-full bg-[#E4C641]" />
-                    <span className="absolute -right-1 -top-1 w-3 h-3 rounded-full bg-[#E4C641]" />
-                  </div>
-                )}
                 <div ref={isDragged ? dragCardRef : undefined}
                   className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color,opacity] duration-150
                     ${isDragged
-                      ? "bg-white border-[#E0BE24]"
-                      : "bg-white border-transparent"}`}
+                      ? "bg-[#FFF3AE] border-[#E0BE24]"
+                      : dragVisitId ? "bg-white border-[#EEE9DC] opacity-70" : "bg-white border-transparent"}`}
                   style={isDragged && dragOverlay ? {
                     position: "fixed", top: 0, left: 0,
                     width: dragOverlay.width, height: dragOverlay.height, zIndex: 100,
-                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(0.82)`,
-                    willChange: "transform", boxShadow: "0 16px 34px rgba(43,41,36,0.24)",
+                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(0.94)`,
+                    willChange: "transform", boxShadow: "0 12px 26px rgba(127,100,0,0.24)",
                   } : { boxShadow: "0 2px 8px rgba(43,41,36,0.08)" }}>
                   <div className="flex-1 min-w-0">
                     <p className="text-[15px] font-medium text-[#2B2924] truncate">{place.name}</p>
@@ -1523,6 +1564,179 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           <Plus size={16} /> 添加地点
         </button>
       </div>
+    </div>
+  )
+}
+
+// ─── Memo Tab ─────────────────────────────────────────────────────────────────
+
+function MemoTab({ trip, onChange, showToast }:
+  { trip: Trip; onChange: (memos: TripMemo[]) => void; showToast: (msg: string) => void }) {
+  const [category, setCategory] = useState<MemoCategory | null>(null)
+  const [typePickerOpen, setTypePickerOpen] = useState(false)
+  const [editor, setEditor] = useState<{ open: boolean; id: string | null; type: MemoType; title: string; content: string; items: ChecklistItem[] }>({
+    open: false, id: null, type: "text", title: "", content: "", items: [],
+  })
+
+  const categoryInfo = MEMO_CATEGORIES.find(item => item.key === category)
+  const categoryMemos = category ? trip.memos.filter(memo => memo.category === category).sort((a, b) => b.updatedAt - a.updatedAt) : []
+  const changeMemo = (memoId: string, fn: (memo: TripMemo) => TripMemo) =>
+    onChange(trip.memos.map(memo => memo.id === memoId ? fn(memo) : memo))
+
+  const openNewMemo = (type: MemoType) => {
+    setTypePickerOpen(false)
+    setEditor({ open: true, id: null, type, title: type === "text" ? "新笔记" : "新清单", content: "", items: [] })
+  }
+  const openEditMemo = (memo: TripMemo) => setEditor({
+    open: true, id: memo.id, type: memo.type, title: memo.title, content: memo.content,
+    items: memo.items.map(item => ({ ...item })),
+  })
+  const saveMemo = () => {
+    if (!category || !editor.title.trim()) return
+    if (editor.id) {
+      onChange(trip.memos.map(memo => memo.id === editor.id ? {
+        ...memo, title: editor.title.trim(), content: editor.content,
+        items: editor.items, updatedAt: Date.now(),
+      } : memo))
+      showToast("备忘已更新")
+    } else {
+      onChange([...trip.memos, {
+        id: genMemoId(), category, type: editor.type, title: editor.title.trim(),
+        content: editor.content, items: editor.items, updatedAt: Date.now(),
+      }])
+      showToast(editor.type === "text" ? "文字笔记已创建" : "清单已创建")
+    }
+    setEditor(current => ({ ...current, open: false }))
+  }
+  const deleteMemo = (memo: TripMemo) => {
+    if (!window.confirm(`确定删除“${memo.title}”吗？`)) return
+    onChange(trip.memos.filter(item => item.id !== memo.id))
+    showToast("备忘已删除")
+  }
+
+  if (!category) {
+    return (
+      <div className="flex flex-col h-full overflow-y-auto px-4 pt-3 pb-5" style={{ scrollbarWidth: "none" }}>
+        <div className="mb-4">
+          <h2 className="text-[20px] font-bold text-[#2B2924]">备忘</h2>
+          <p className="text-[12px] mt-1" style={{ color: SEC }}>把行前信息、清单和零散想法放在当前旅行中</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {MEMO_CATEGORIES.map(({ key, label, desc, icon: Icon }) => {
+            const memos = trip.memos.filter(memo => memo.category === key)
+            const checklistItems = memos.filter(memo => memo.type === "checklist").flatMap(memo => memo.items)
+            const completed = checklistItems.filter(item => item.completed).length
+            return (
+              <button key={key} onClick={() => setCategory(key)}
+                className="min-h-36 bg-white rounded-3xl border border-[#EEE9DC] p-4 text-left active:scale-[0.98] transition-transform shadow-[0_2px_8px_rgba(43,41,36,0.05)]">
+                <div className="w-10 h-10 rounded-2xl bg-[#F7E8AA] flex items-center justify-center mb-4">
+                  <Icon size={20} strokeWidth={1.6} className="text-[#2B2924]" />
+                </div>
+                <p className="text-[16px] font-semibold text-[#2B2924]">{label}</p>
+                <p className="text-[11px] leading-relaxed mt-1" style={{ color: SEC }}>{desc}</p>
+                <p className="text-[11px] mt-3" style={{ color: TERC }}>
+                  {memos.length === 0 ? "暂无内容" : checklistItems.length > 0 ? `${memos.length}条内容 · 已完成${completed}/${checklistItems.length}` : `${memos.length}条内容`}
+                </p>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="shrink-0 flex items-center gap-2 px-3 pt-2 pb-3 border-b border-[#EEE9DC]">
+        <button onClick={() => setCategory(null)} className="w-10 h-10 flex items-center justify-center rounded-xl active:bg-[#EEE9DC]">
+          <ChevronLeft size={21} style={{ color: SEC }} />
+        </button>
+        <div className="flex-1">
+          <h2 className="text-[18px] font-bold text-[#2B2924]">{categoryInfo?.label}</h2>
+          <p className="text-[11px]" style={{ color: SEC }}>{categoryMemos.length} 条内容</p>
+        </div>
+        <button onClick={() => setTypePickerOpen(true)} className="w-10 h-10 rounded-full bg-[#F8DF72] flex items-center justify-center active:scale-95">
+          <Plus size={20} strokeWidth={2.4} />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-4" style={{ scrollbarWidth: "none" }}>
+        {categoryMemos.length === 0 ? (
+          <Empty icon={NotebookPen} title="这里还没有备忘" desc="可以添加文字笔记或待办清单" action={{ label: "添加第一条内容", onClick: () => setTypePickerOpen(true) }} />
+        ) : (
+          <div className="flex flex-col gap-3">
+            {categoryMemos.map(memo => {
+              const completed = memo.items.filter(item => item.completed).length
+              return (
+                <div key={memo.id} className="bg-white rounded-3xl border border-[#EEE9DC] p-4 shadow-[0_2px_8px_rgba(43,41,36,0.05)]">
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className="w-9 h-9 rounded-2xl bg-[#FFF6CC] flex items-center justify-center shrink-0">
+                      {memo.type === "text" ? <FileText size={18} /> : <ListChecks size={18} />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[15px] font-semibold text-[#2B2924] truncate">{memo.title}</p>
+                      <p className="text-[11px]" style={{ color: TERC }}>{memo.type === "text" ? "文字笔记" : `已完成 ${completed}/${memo.items.length}`}</p>
+                    </div>
+                    <button onClick={() => openEditMemo(memo)} className="w-9 h-9 flex items-center justify-center rounded-xl active:bg-[#F7F4EA]"><Edit3 size={15} style={{ color: SEC }} /></button>
+                    <button onClick={() => deleteMemo(memo)} className="w-9 h-9 flex items-center justify-center rounded-xl active:bg-[#FFF0EC]"><Trash2 size={15} className="text-[#C96B58]" /></button>
+                  </div>
+                  {memo.type === "text" ? (
+                    <button onClick={() => openEditMemo(memo)} className="w-full text-left text-[13px] leading-relaxed whitespace-pre-wrap min-h-12" style={{ color: memo.content ? SEC : TERC }}>
+                      {memo.content || "点击编辑笔记内容"}
+                    </button>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      {memo.items.map(item => (
+                        <div key={item.id} className="flex items-center gap-2 min-h-10">
+                          <button onClick={() => changeMemo(memo.id, current => ({ ...current, items: current.items.map(value => value.id === item.id ? { ...value, completed: !value.completed } : value), updatedAt: Date.now() }))}
+                            className={`w-6 h-6 rounded-lg border flex items-center justify-center shrink-0 ${item.completed ? "bg-[#F8DF72] border-[#E4C641]" : "bg-white border-[#CFC9BC]"}`}>
+                            {item.completed && <Check size={14} />}
+                          </button>
+                          <input value={item.text} placeholder="输入清单项目"
+                            onChange={event => changeMemo(memo.id, current => ({ ...current, items: current.items.map(value => value.id === item.id ? { ...value, text: event.target.value } : value), updatedAt: Date.now() }))}
+                            className={`flex-1 min-w-0 bg-transparent outline-none text-[13px] py-2 ${item.completed ? "line-through" : ""}`}
+                            style={{ color: item.completed ? TERC : "#2B2924" }} />
+                          <button onClick={() => changeMemo(memo.id, current => ({ ...current, items: current.items.filter(value => value.id !== item.id), updatedAt: Date.now() }))}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg active:bg-[#FFF0EC]"><X size={14} style={{ color: TERC }} /></button>
+                        </div>
+                      ))}
+                      <button onClick={() => changeMemo(memo.id, current => ({ ...current, items: [...current.items, { id: genMemoId("i"), text: "", completed: false }], updatedAt: Date.now() }))}
+                        className="h-10 rounded-xl border border-dashed border-[#D8D1C2] text-[12px] flex items-center justify-center gap-1.5 mt-1" style={{ color: SEC }}>
+                        <Plus size={14} /> 添加项目
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <Sheet open={typePickerOpen} onClose={() => setTypePickerOpen(false)} title="添加备忘">
+        <div className="px-4 pb-7 grid grid-cols-2 gap-3">
+          <button onClick={() => openNewMemo("text")} className="rounded-3xl bg-[#FFFCF3] border border-[#EEE9DC] p-5 text-left active:bg-[#FFF6CC]">
+            <FileText size={24} className="mb-4 text-[#8A7200]" /><p className="text-[16px] font-semibold">文字笔记</p><p className="text-[11px] mt-1" style={{ color: SEC }}>记录地址、提示和想法</p>
+          </button>
+          <button onClick={() => openNewMemo("checklist")} className="rounded-3xl bg-[#FFFCF3] border border-[#EEE9DC] p-5 text-left active:bg-[#FFF6CC]">
+            <ListChecks size={24} className="mb-4 text-[#8A7200]" /><p className="text-[16px] font-semibold">清单</p><p className="text-[11px] mt-1" style={{ color: SEC }}>逐项添加并勾选完成</p>
+          </button>
+        </div>
+      </Sheet>
+
+      <Sheet open={editor.open} onClose={() => setEditor(current => ({ ...current, open: false }))} title={editor.id ? "编辑备忘" : editor.type === "text" ? "新建文字笔记" : "新建清单"}>
+        <div className="px-5 pb-7">
+          <label className="block text-[13px] font-medium mb-2">标题</label>
+          <input value={editor.title} maxLength={40} onChange={event => setEditor(current => ({ ...current, title: event.target.value }))}
+            className="w-full h-12 rounded-2xl border border-[#E5DFD0] bg-[#FFFCF3] px-4 text-[15px] outline-none focus:border-[#E4C641] mb-4" />
+          {editor.type === "text" && <>
+            <label className="block text-[13px] font-medium mb-2">内容</label>
+            <textarea value={editor.content} onChange={event => setEditor(current => ({ ...current, content: event.target.value }))}
+              placeholder="记录营业时间、预约方式、注意事项……" className="w-full min-h-40 rounded-2xl border border-[#E5DFD0] bg-[#FFFCF3] p-4 text-[14px] leading-relaxed outline-none resize-none focus:border-[#E4C641] mb-5" />
+          </>}
+          {editor.type === "checklist" && <p className="text-[12px] leading-relaxed mb-5" style={{ color: SEC }}>保存清单后，可以在卡片中添加、编辑、删除和勾选项目。</p>}
+          <Btn variant="primary" className="w-full" disabled={!editor.title.trim()} onClick={saveMemo}>保存</Btn>
+        </div>
+      </Sheet>
     </div>
   )
 }
@@ -1862,7 +2076,7 @@ export default function App() {
   }
 
   const createTrip = () => {
-    const nt: Trip = { id: genId(), name: createForm.name, destination: createForm.dest, dateMode: createForm.dateMode, days: createForm.days, startDate: createForm.startDate, places: [] }
+    const nt: Trip = { id: genId(), name: createForm.name, destination: createForm.dest, dateMode: createForm.dateMode, days: createForm.days, startDate: createForm.startDate, places: [], memos: [] }
     setTrips(ts => [...ts, nt]); setCurTripId(nt.id)
     setScreen("workspace"); setWsTab("itinerary"); setSelectedDay(1)
     setCreateForm({ name: "", dest: "", dateMode: "pending", days: 7, startDate: "" })
@@ -2039,6 +2253,11 @@ export default function App() {
                   selectedId={mapSelectedId} setSelectedId={setMapSelectedId}
                   onMarker={id => setMapSum({ open: true, id })} />
               )}
+              {wsTab === "memo" && (
+                <MemoTab trip={trip}
+                  onChange={memos => updateTrip(t => ({ ...t, memos }))}
+                  showToast={showToast} />
+              )}
             </div>
 
             {/* Bottom nav — hidden in reorder mode */}
@@ -2048,6 +2267,7 @@ export default function App() {
                   { tab: "pool"      as WsTab, icon: LayoutList,  label: "地点池" },
                   { tab: "itinerary" as WsTab, icon: CalendarDays, label: "每日行程" },
                   { tab: "map"       as WsTab, icon: MapIcon,      label: "地图" },
+                  { tab: "memo"      as WsTab, icon: NotebookPen,  label: "备忘" },
                 ] as const).map(({ tab, icon: Icon, label }) => (
                   <button key={tab} onClick={() => { setWsTab(tab); setIsReorder(false); setMapListOpen(false) }}
                     className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-2xl transition-all ${wsTab === tab ? "bg-[#F8DF72]" : ""}`}>
