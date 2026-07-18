@@ -1373,6 +1373,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const pointerY = event.clientY
     const nextLeft = pointerX - currentOverlay.offsetX
     const nextTop = pointerY - currentOverlay.offsetY
+    const draggedCenterY = nextTop + currentOverlay.height / 2
     const nextOverlay = { ...currentOverlay, left: nextLeft, top: nextTop }
     dragOverlayRef.current = nextOverlay
     if (dragCardRef.current) {
@@ -1386,19 +1387,20 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const remaining = current.filter(visitId => visitId !== activeVisitId)
     const elements = Array.from(document.querySelectorAll<HTMLElement>("[data-reorder-slot]"))
     const elementMap = new Map(elements.map(element => [element.dataset.visitId || "", element]))
-    const contentY = pointerY - scrollRect.top + scrollArea.scrollTop
 
     let insertionIndex: number
-    if (pointerY <= scrollRect.top + 72) {
+    if (draggedCenterY <= scrollRect.top + 72) {
       insertionIndex = 0
       scrollArea.scrollTop = Math.max(0, scrollArea.scrollTop - 28)
-    } else if (pointerY >= scrollRect.bottom - 72) {
+    } else if (draggedCenterY >= scrollRect.bottom - 72) {
       insertionIndex = remaining.length
       scrollArea.scrollTop += 28
     } else {
       insertionIndex = remaining.filter(visitId => {
         const element = elementMap.get(visitId)
-        return element ? contentY > element.offsetTop + element.offsetHeight / 2 : false
+        if (!element) return false
+        const rect = element.getBoundingClientRect()
+        return draggedCenterY > rect.top + rect.height / 2
       }).length
     }
 
