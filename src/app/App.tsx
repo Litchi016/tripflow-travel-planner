@@ -1258,6 +1258,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const dayPlaces  = getDayPlaces(trip.places, selectedDay)
   const hasAnyPlace = trip.places.length > 0
   const [dragVisitId, setDragVisitId] = useState<string | null>(null)
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [dragOverlay, setDragOverlay] = useState<{ top: number; left: number; width: number; height: number; offsetX: number; offsetY: number } | null>(null)
   const dragOverlayRef = useRef<typeof dragOverlay>(null)
   const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
@@ -1293,6 +1294,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const rect = slot.getBoundingClientRect()
     event.currentTarget.setPointerCapture(event.pointerId)
     lastDropTargetRef.current = null
+    setDropTargetId(null)
     setDragVisitId(visitId)
     const overlay = {
       top: rect.top, left: rect.left, width: rect.width, height: rect.height,
@@ -1314,7 +1316,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const nextOverlay = { ...currentOverlay, left: nextLeft, top: nextTop }
     dragOverlayRef.current = nextOverlay
     if (dragCardRef.current) {
-      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(0.94)`
+      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(0.82)`
     }
 
     const scrollArea = reorderScrollRef.current
@@ -1336,6 +1338,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const targetId = target?.dataset.visitId
     if (targetId && targetId !== lastDropTargetRef.current) {
       lastDropTargetRef.current = targetId
+      setDropTargetId(targetId)
       setDragOverlay(nextOverlay)
       onReorder(dragVisitId, targetId)
     }
@@ -1347,6 +1350,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     }
     lastDropTargetRef.current = null
+    setDropTargetId(null)
     dragOverlayRef.current = null
     setDragOverlay(null)
     setDragVisitId(null)
@@ -1379,18 +1383,24 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           {dayPlaces.map(place => {
             const isDragged = dragVisitId === place.visitId
             return (
-              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
+              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="relative mb-4"
                 style={isDragged && dragOverlay ? { height: dragOverlay.height } : undefined}>
+                {dragVisitId && dropTargetId === place.visitId && !isDragged && (
+                  <div className="absolute -top-2.5 left-2 right-2 h-1 rounded-full bg-[#E4C641] z-10 shadow-[0_1px_5px_rgba(200,162,0,0.35)]">
+                    <span className="absolute -left-1 -top-1 w-3 h-3 rounded-full bg-[#E4C641]" />
+                    <span className="absolute -right-1 -top-1 w-3 h-3 rounded-full bg-[#E4C641]" />
+                  </div>
+                )}
                 <div ref={isDragged ? dragCardRef : undefined}
                   className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color,opacity] duration-150
                     ${isDragged
-                      ? "bg-[#FFF3AE] border-[#E0BE24]"
-                      : dragVisitId ? "bg-white border-[#EEE9DC] opacity-70" : "bg-white border-transparent"}`}
+                      ? "bg-white border-[#E0BE24]"
+                      : "bg-white border-transparent"}`}
                   style={isDragged && dragOverlay ? {
                     position: "fixed", top: 0, left: 0,
                     width: dragOverlay.width, height: dragOverlay.height, zIndex: 100,
-                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(0.94)`,
-                    willChange: "transform", boxShadow: "0 12px 26px rgba(127,100,0,0.24)",
+                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(0.82)`,
+                    willChange: "transform", boxShadow: "0 16px 34px rgba(43,41,36,0.24)",
                   } : { boxShadow: "0 2px 8px rgba(43,41,36,0.08)" }}>
                   <div className="flex-1 min-w-0">
                     <p className="text-[15px] font-medium text-[#2B2924] truncate">{place.name}</p>
