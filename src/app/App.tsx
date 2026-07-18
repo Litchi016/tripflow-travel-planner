@@ -1380,41 +1380,54 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     }
 
     const scrollArea = reorderScrollRef.current
-    if (scrollArea) {
-      const rect = scrollArea.getBoundingClientRect()
-      if (pointerY < rect.top + 64) scrollArea.scrollTop -= 20
-      else if (pointerY > rect.bottom - 64) scrollArea.scrollTop += 20
+    if (!scrollArea) return
+    const scrollRect = scrollArea.getBoundingClientRect()
+    const current = draftVisitOrderRef.current
+    const remaining = current.filter(visitId => visitId !== activeVisitId)
+    const elements = Array.from(document.querySelectorAll<HTMLElement>("[data-reorder-slot]"))
+    const elementMap = new Map(elements.map(element => [element.dataset.visitId || "", element]))
+    const contentY = pointerY - scrollRect.top + scrollArea.scrollTop
+
+    let insertionIndex: number
+    if (pointerY <= scrollRect.top + 72) {
+      insertionIndex = 0
+      scrollArea.scrollTop = Math.max(0, scrollArea.scrollTop - 28)
+    } else if (pointerY >= scrollRect.bottom - 72) {
+      insertionIndex = remaining.length
+      scrollArea.scrollTop += 28
+    } else {
+      insertionIndex = remaining.filter(visitId => {
+        const element = elementMap.get(visitId)
+        return element ? contentY > element.offsetTop + element.offsetHeight / 2 : false
+      }).length
     }
 
-    const candidates = Array.from(document.querySelectorAll<HTMLElement>("[data-reorder-slot]"))
-      .filter(element => element.dataset.visitId !== activeVisitId)
-    const target = candidates.reduce<HTMLElement | null>((nearest, element) => {
-      if (!nearest) return element
-      const elementRect = element.getBoundingClientRect()
-      const elementMid = elementRect.top + elementRect.height / 2
-      const nearestRect = nearest.getBoundingClientRect()
-      const nearestMid = nearestRect.top + nearestRect.height / 2
-      return Math.abs(elementMid - pointerY) < Math.abs(nearestMid - pointerY) ? element : nearest
-    }, null)
-    const targetId = target?.dataset.visitId
-    const targetRect = target?.getBoundingClientRect()
-    const targetSide = targetRect && pointerY < targetRect.top + targetRect.height / 2 ? "before" : "after"
-    const targetKey = targetId ? `${targetId}:${targetSide}` : null
-    if (targetId && targetKey !== lastDropTargetRef.current) {
+    const targetKey = String(insertionIndex)
+    if (targetKey !== lastDropTargetRef.current) {
       lastDropTargetRef.current = targetKey
-      finalDropTargetRef.current = targetId
-      const current = draftVisitOrderRef.current
-      const sourceIndex = current.indexOf(activeVisitId)
-      const targetIndex = current.indexOf(targetId)
-      if (sourceIndex >= 0 && targetIndex >= 0) {
-        const next = [...current]
-        const [moved] = next.splice(sourceIndex, 1)
-        next.splice(targetIndex, 0, moved)
+      const next = [...remaining]
+      next.splice(insertionIndex, 0, activeVisitId)
+      if (next.some((visitId, index) => visitId !== current[index])) {
+        finalDropTargetRef.current = activeVisitId
+        const before = new Map(elements.map(element => [element.dataset.visitId || "", element.offsetTop]))
         draftVisitOrderRef.current = next
         const orderMap = new Map(next.map((visitId, index) => [visitId, index]))
-        document.querySelectorAll<HTMLElement>("[data-reorder-slot]").forEach(element => {
+        elements.forEach(element => {
           const visitId = element.dataset.visitId
           if (visitId && orderMap.has(visitId)) element.style.order = String(orderMap.get(visitId))
+        })
+        elements.forEach(element => {
+          if (element.dataset.visitId === activeVisitId) return
+          const previousTop = before.get(element.dataset.visitId || "")
+          if (previousTop === undefined) return
+          const delta = previousTop - element.offsetTop
+          if (!delta) return
+          element.style.transition = "none"
+          element.style.transform = `translate3d(0, ${delta}px, 0)`
+          requestAnimationFrame(() => {
+            element.style.transition = "transform 140ms cubic-bezier(.2,.8,.2,1)"
+            element.style.transform = "translate3d(0, 0, 0)"
+          })
         })
       }
     }
@@ -1464,7 +1477,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
             const isDragged = dragVisitId === place.visitId
             return (
               <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
-                style={isDragged && dragOverlay ? { height: dragOverlay.height } : undefined}>
+                style={isDragged && dragOverlay ? { height: dragOverlay.height + 20 } : undefined}>
                 <div ref={isDragged ? dragCardRef : undefined}
                   className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color] duration-150
                     ${isDragged
