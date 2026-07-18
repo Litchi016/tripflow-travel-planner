@@ -1409,25 +1409,15 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
       next.splice(insertionIndex, 0, activeVisitId)
       if (next.some((visitId, index) => visitId !== current[index])) {
         finalDropTargetRef.current = activeVisitId
-        const before = new Map(elements.map(element => [element.dataset.visitId || "", element.offsetTop]))
         draftVisitOrderRef.current = next
         const orderMap = new Map(next.map((visitId, index) => [visitId, index]))
         elements.forEach(element => {
           const visitId = element.dataset.visitId
-          if (visitId && orderMap.has(visitId)) element.style.order = String(orderMap.get(visitId))
-        })
-        elements.forEach(element => {
-          if (element.dataset.visitId === activeVisitId) return
-          const previousTop = before.get(element.dataset.visitId || "")
-          if (previousTop === undefined) return
-          const delta = previousTop - element.offsetTop
-          if (!delta) return
-          element.style.transition = "none"
-          element.style.transform = `translate3d(0, ${delta}px, 0)`
-          requestAnimationFrame(() => {
-            element.style.transition = "transform 140ms cubic-bezier(.2,.8,.2,1)"
-            element.style.transform = "translate3d(0, 0, 0)"
-          })
+          if (visitId && orderMap.has(visitId)) {
+            element.style.transition = "none"
+            element.style.transform = "none"
+            element.style.order = String(orderMap.get(visitId))
+          }
         })
       }
     }
@@ -1476,8 +1466,12 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           {dayPlaces.map(place => {
             const isDragged = dragVisitId === place.visitId
             return (
-              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
-                style={isDragged && dragOverlay ? { height: dragOverlay.height + 20 } : undefined}>
+              <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-3 shrink-0"
+                style={isDragged && dragOverlay ? {
+                  height: dragOverlay.height + 48,
+                  minHeight: dragOverlay.height + 48,
+                  flexShrink: 0,
+                } : { flexShrink: 0 }}>
                 <div ref={isDragged ? dragCardRef : undefined}
                   className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color] duration-150
                     ${isDragged
