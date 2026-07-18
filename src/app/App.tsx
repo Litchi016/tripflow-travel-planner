@@ -1312,7 +1312,6 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const dragVisitIdRef = useRef<string | null>(null)
   const [dragOverlay, setDragOverlay] = useState<{ top: number; left: number; width: number; height: number; offsetX: number; offsetY: number } | null>(null)
   const dragOverlayRef = useRef<typeof dragOverlay>(null)
-  const [draftVisitOrder, setDraftVisitOrder] = useState<string[]>([])
   const draftVisitOrderRef = useRef<string[]>([])
   const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
   const swipeStart = useRef<{ x: number; y: number } | null>(null)
@@ -1320,14 +1319,9 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const dragCardRef = useRef<HTMLDivElement | null>(null)
   const lastDropTargetRef = useRef<string | null>(null)
   const finalDropTargetRef = useRef<string | null>(null)
-  const displayedDayPlaces = isReorder && draftVisitOrder.length
-    ? [...dayPlaces].sort((a, b) => draftVisitOrder.indexOf(a.visitId) - draftVisitOrder.indexOf(b.visitId))
-    : dayPlaces
-
   useEffect(() => {
     const next = isReorder ? dayPlaces.map(place => place.visitId) : []
     draftVisitOrderRef.current = next
-    setDraftVisitOrder(next)
   }, [isReorder, selectedDay])
 
   const changeDay = (nextDay: number) => {
@@ -1358,6 +1352,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     event.currentTarget.setPointerCapture(event.pointerId)
     lastDropTargetRef.current = null
     finalDropTargetRef.current = null
+    draftVisitOrderRef.current = dayPlaces.map(place => place.visitId)
     dragVisitIdRef.current = visitId
     setDragVisitId(visitId)
     const overlay = {
@@ -1408,17 +1403,20 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     if (targetId && targetKey !== lastDropTargetRef.current) {
       lastDropTargetRef.current = targetKey
       finalDropTargetRef.current = targetId
-      setDragOverlay(nextOverlay)
-      setDraftVisitOrder(current => {
-        const sourceIndex = current.indexOf(activeVisitId)
-        const targetIndex = current.indexOf(targetId)
-        if (sourceIndex < 0 || targetIndex < 0) return current
+      const current = draftVisitOrderRef.current
+      const sourceIndex = current.indexOf(activeVisitId)
+      const targetIndex = current.indexOf(targetId)
+      if (sourceIndex >= 0 && targetIndex >= 0) {
         const next = [...current]
         const [moved] = next.splice(sourceIndex, 1)
         next.splice(targetIndex, 0, moved)
         draftVisitOrderRef.current = next
-        return next
-      })
+        const orderMap = new Map(next.map((visitId, index) => [visitId, index]))
+        document.querySelectorAll<HTMLElement>("[data-reorder-slot]").forEach(element => {
+          const visitId = element.dataset.visitId
+          if (visitId && orderMap.has(visitId)) element.style.order = String(orderMap.get(visitId))
+        })
+      }
     }
   }
 
@@ -1461,17 +1459,17 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           <button onClick={onDoneReorder} className="text-[15px] font-semibold text-[#C8A200] px-1">完成</button>
         </div>
         <p className="px-4 pt-3 text-[12px] shrink-0" style={{ color: SEC }}>按住右侧手柄上下拖动，松手后保存当前位置</p>
-        <div ref={reorderScrollRef} className="flex-1 overflow-y-auto px-4 py-3" style={{ scrollbarWidth: "none" }}>
-          {displayedDayPlaces.map(place => {
+        <div ref={reorderScrollRef} className="flex-1 overflow-y-auto px-4 py-3 flex flex-col" style={{ scrollbarWidth: "none" }}>
+          {dayPlaces.map(place => {
             const isDragged = dragVisitId === place.visitId
             return (
               <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
                 style={isDragged && dragOverlay ? { height: dragOverlay.height } : undefined}>
                 <div ref={isDragged ? dragCardRef : undefined}
-                  className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color,opacity] duration-150
+                  className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 border transition-[box-shadow,background-color,border-color] duration-150
                     ${isDragged
                       ? "bg-[#FFF3AE] border-[#E0BE24]"
-                      : dragVisitId ? "bg-white border-[#EEE9DC] opacity-70" : "bg-white border-transparent"}`}
+                      : dragVisitId ? "bg-white border-[#EEE9DC]" : "bg-white border-transparent"}`}
                   style={isDragged && dragOverlay ? {
                     position: "fixed", top: 0, left: 0,
                     width: dragOverlay.width, height: dragOverlay.height, zIndex: 100,
