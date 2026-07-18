@@ -1305,17 +1305,30 @@ function PlacePoolTab({ trip, filter, setFilter, onAdd, onArrange, onActions, on
 // ─── Itinerary Tab ────────────────────────────────────────────────────────────
 
 function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReorder, onEnterReorder, onCancelReorder, onDoneReorder, expandedId, setExpandedId, onAddOptions, onActions, onReorder, showToast }:
-  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (visitId: string) => void; onReorder: (visitId: string, targetVisitId: string) => void; showToast: (msg: string, undo?: () => void) => void }) {
+  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (visitId: string) => void; onReorder: (orderedVisitIds: string[]) => void; showToast: (msg: string, undo?: () => void) => void }) {
   const dayPlaces  = getDayPlaces(trip.places, selectedDay)
   const hasAnyPlace = trip.places.length > 0
   const [dragVisitId, setDragVisitId] = useState<string | null>(null)
+  const dragVisitIdRef = useRef<string | null>(null)
   const [dragOverlay, setDragOverlay] = useState<{ top: number; left: number; width: number; height: number; offsetX: number; offsetY: number } | null>(null)
   const dragOverlayRef = useRef<typeof dragOverlay>(null)
+  const [draftVisitOrder, setDraftVisitOrder] = useState<string[]>([])
+  const draftVisitOrderRef = useRef<string[]>([])
   const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
   const swipeStart = useRef<{ x: number; y: number } | null>(null)
   const reorderScrollRef = useRef<HTMLDivElement | null>(null)
   const dragCardRef = useRef<HTMLDivElement | null>(null)
   const lastDropTargetRef = useRef<string | null>(null)
+  const finalDropTargetRef = useRef<string | null>(null)
+  const displayedDayPlaces = isReorder && draftVisitOrder.length
+    ? [...dayPlaces].sort((a, b) => draftVisitOrder.indexOf(a.visitId) - draftVisitOrder.indexOf(b.visitId))
+    : dayPlaces
+
+  useEffect(() => {
+    const next = isReorder ? dayPlaces.map(place => place.visitId) : []
+    draftVisitOrderRef.current = next
+    setDraftVisitOrder(next)
+  }, [isReorder, selectedDay])
 
   const changeDay = (nextDay: number) => {
     if (nextDay < 1 || nextDay > trip.days || nextDay === selectedDay) return
@@ -1344,6 +1357,8 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const rect = slot.getBoundingClientRect()
     event.currentTarget.setPointerCapture(event.pointerId)
     lastDropTargetRef.current = null
+    finalDropTargetRef.current = null
+    dragVisitIdRef.current = visitId
     setDragVisitId(visitId)
     const overlay = {
       top: rect.top, left: rect.left, width: rect.width, height: rect.height,
@@ -1356,7 +1371,8 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
 
   const handleDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
     const currentOverlay = dragOverlayRef.current
-    if (!dragVisitId || !currentOverlay) return
+    const activeVisitId = dragVisitIdRef.current
+    if (!activeVisitId || !currentOverlay) return
     event.preventDefault()
     const pointerX = event.clientX
     const pointerY = event.clientY
@@ -1376,28 +1392,47 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     }
 
     const candidates = Array.from(document.querySelectorAll<HTMLElement>("[data-reorder-slot]"))
-      .filter(element => element.dataset.visitId !== dragVisitId)
+      .filter(element => element.dataset.visitId !== activeVisitId)
     const target = candidates.reduce<HTMLElement | null>((nearest, element) => {
       if (!nearest) return element
-      const elementMid = element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2
+      const elementRect = element.getBoundingClientRect()
+      const elementMid = elementRect.top + elementRect.height / 2
       const nearestRect = nearest.getBoundingClientRect()
       const nearestMid = nearestRect.top + nearestRect.height / 2
       return Math.abs(elementMid - pointerY) < Math.abs(nearestMid - pointerY) ? element : nearest
     }, null)
     const targetId = target?.dataset.visitId
-    if (targetId && targetId !== lastDropTargetRef.current) {
-      lastDropTargetRef.current = targetId
+    const targetRect = target?.getBoundingClientRect()
+    const targetSide = targetRect && pointerY < targetRect.top + targetRect.height / 2 ? "before" : "after"
+    const targetKey = targetId ? `${targetId}:${targetSide}` : null
+    if (targetId && targetKey !== lastDropTargetRef.current) {
+      lastDropTargetRef.current = targetKey
+      finalDropTargetRef.current = targetId
       setDragOverlay(nextOverlay)
-      onReorder(dragVisitId, targetId)
+      setDraftVisitOrder(current => {
+        const sourceIndex = current.indexOf(activeVisitId)
+        const targetIndex = current.indexOf(targetId)
+        if (sourceIndex < 0 || targetIndex < 0) return current
+        const next = [...current]
+        const [moved] = next.splice(sourceIndex, 1)
+        next.splice(targetIndex, 0, moved)
+        draftVisitOrderRef.current = next
+        return next
+      })
     }
   }
 
   const handleDragEnd = (event?: React.PointerEvent<HTMLButtonElement>) => {
+    const activeVisitId = dragVisitIdRef.current
+    const finalTargetId = finalDropTargetRef.current
     if (event) {
       event.preventDefault()
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    if (activeVisitId && finalTargetId) onReorder(draftVisitOrderRef.current)
     lastDropTargetRef.current = null
+    finalDropTargetRef.current = null
+    dragVisitIdRef.current = null
     dragOverlayRef.current = null
     setDragOverlay(null)
     setDragVisitId(null)
@@ -1427,7 +1462,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
         </div>
         <p className="px-4 pt-3 text-[12px] shrink-0" style={{ color: SEC }}>按住右侧手柄上下拖动，松手后保存当前位置</p>
         <div ref={reorderScrollRef} className="flex-1 overflow-y-auto px-4 py-3" style={{ scrollbarWidth: "none" }}>
-          {dayPlaces.map(place => {
+          {displayedDayPlaces.map(place => {
             const isDragged = dragVisitId === place.visitId
             return (
               <div key={place.visitId} data-reorder-slot data-visit-id={place.visitId} className="mb-2"
@@ -2027,20 +2062,10 @@ export default function App() {
     showToast("地点已删除")
   }
 
-  const reorderVisit = (visitId: string, targetVisitId: string) => {
-    if (visitId === targetVisitId) return
+  const reorderVisit = (orderedVisitIds: string[]) => {
+    if (orderedVisitIds.length < 2) return
     updateTrip(t => {
-      const source = getVisit(t.places, visitId)
-      const target = getVisit(t.places, targetVisitId)
-      if (!source || !target || source.visit.day !== target.visit.day) return t
-      const dayVisits = getDayPlaces(t.places, source.visit.day)
-      const sourceIndex = dayVisits.findIndex(item => item.visitId === visitId)
-      const targetIndex = dayVisits.findIndex(item => item.visitId === targetVisitId)
-      if (sourceIndex < 0 || targetIndex < 0) return t
-      const reordered = [...dayVisits]
-      const [moved] = reordered.splice(sourceIndex, 1)
-      reordered.splice(targetIndex, 0, moved)
-      const orderMap = new Map(reordered.map((item, index) => [item.visitId, index + 1]))
+      const orderMap = new Map(orderedVisitIds.map((visitId, index) => [visitId, index + 1]))
       return { ...t, places: t.places.map(p => ({ ...p, visits: p.visits.map(v => orderMap.has(v.id) ? { ...v, order: orderMap.get(v.id)! } : v) })) }
     })
   }
