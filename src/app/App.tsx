@@ -1259,6 +1259,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const hasAnyPlace = trip.places.length > 0
   const [dragVisitId, setDragVisitId] = useState<string | null>(null)
   const [dragOverlay, setDragOverlay] = useState<{ top: number; left: number; width: number; height: number; offsetX: number; offsetY: number } | null>(null)
+  const dragOverlayRef = useRef<typeof dragOverlay>(null)
   const [slideDirection, setSlideDirection] = useState<"left" | "right">("left")
   const swipeStart = useRef<{ x: number; y: number } | null>(null)
   const reorderScrollRef = useRef<HTMLDivElement | null>(null)
@@ -1293,24 +1294,28 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     event.currentTarget.setPointerCapture(event.pointerId)
     lastDropTargetRef.current = null
     setDragVisitId(visitId)
-    setDragOverlay({
+    const overlay = {
       top: rect.top, left: rect.left, width: rect.width, height: rect.height,
       offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top,
-    })
+    }
+    dragOverlayRef.current = overlay
+    setDragOverlay(overlay)
     if (navigator.vibrate) navigator.vibrate(12)
   }
 
   const handleDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (!dragVisitId || !dragOverlay) return
+    const currentOverlay = dragOverlayRef.current
+    if (!dragVisitId || !currentOverlay) return
     event.preventDefault()
     const pointerX = event.clientX
     const pointerY = event.clientY
-    const nextLeft = pointerX - dragOverlay.offsetX
-    const nextTop = pointerY - dragOverlay.offsetY
+    const nextLeft = pointerX - currentOverlay.offsetX
+    const nextTop = pointerY - currentOverlay.offsetY
+    const nextOverlay = { ...currentOverlay, left: nextLeft, top: nextTop }
+    dragOverlayRef.current = nextOverlay
     if (dragCardRef.current) {
-      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(1.035)`
+      dragCardRef.current.style.transform = `translate3d(${nextLeft}px, ${nextTop}px, 0) scale(0.94)`
     }
-    setDragOverlay(current => current ? { ...current, left: pointerX - current.offsetX, top: pointerY - current.offsetY } : current)
 
     const scrollArea = reorderScrollRef.current
     if (scrollArea) {
@@ -1331,6 +1336,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
     const targetId = target?.dataset.visitId
     if (targetId && targetId !== lastDropTargetRef.current) {
       lastDropTargetRef.current = targetId
+      setDragOverlay(nextOverlay)
       onReorder(dragVisitId, targetId)
     }
   }
@@ -1341,6 +1347,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     }
     lastDropTargetRef.current = null
+    dragOverlayRef.current = null
     setDragOverlay(null)
     setDragVisitId(null)
   }
@@ -1382,8 +1389,8 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
                   style={isDragged && dragOverlay ? {
                     position: "fixed", top: 0, left: 0,
                     width: dragOverlay.width, height: dragOverlay.height, zIndex: 100,
-                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(1.035)`,
-                    willChange: "transform", boxShadow: "0 18px 38px rgba(127,100,0,0.30)",
+                    transform: `translate3d(${dragOverlay.left}px, ${dragOverlay.top}px, 0) scale(0.94)`,
+                    willChange: "transform", boxShadow: "0 12px 26px rgba(127,100,0,0.24)",
                   } : { boxShadow: "0 2px 8px rgba(43,41,36,0.08)" }}>
                   <div className="flex-1 min-w-0">
                     <p className="text-[15px] font-medium text-[#2B2924] truncate">{place.name}</p>
