@@ -7,7 +7,8 @@ import {
   Navigation2, CheckCircle2, Map as MapIcon,
   RotateCcw, ChevronRight, AlertCircle, Clock3,
   User, Bell, Globe, Sun, Shield, HelpCircle, Info, MessageSquare,
-  NotebookPen, ListChecks, FileText, Luggage, ClipboardCheck
+  NotebookPen, ListChecks, FileText, Luggage, ClipboardCheck,
+  Footprints, Car, Bus
 } from "lucide-react"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,13 +21,16 @@ type ItvView = "normal" | "compact"
 type GlobalTab = "trips" | "profile"
 type DayPickerMode = "arrange" | "repeat" | "move"
 type MemoType = "text" | "checklist"
-type MemoCategory = "preparation" | "packing" | "food" | "other"
+type MemoCategory = string
+type LongDistanceMode = "driving" | "transit"
 
 interface ChecklistItem { id: string; text: string; completed: boolean }
 interface TripMemo {
   id: string; category: MemoCategory; type: MemoType; title: string
   content: string; items: ChecklistItem[]; updatedAt: number
 }
+interface MemoFolder { id: string; title: string; desc: string; builtIn?: boolean }
+interface TrashedMemoFolder { folder: MemoFolder; memos: TripMemo[]; trashedAt: number }
 
 interface Visit {
   id: string
@@ -40,12 +44,29 @@ interface Place {
   id: string; name: string; type: PlaceType; note: string
   address: string; dayAssigned: number | null; order: number
   coords: { x: number; y: number }
+  amapPoiId?: string
+  lng?: number
+  lat?: number
+  hotelStay?: { checkInDay: number; checkOutDay: number }
   visits: Visit[]
+}
+interface PlaceForm {
+  name: string; type: PlaceType; note: string; address: string
+  amapPoiId?: string; lng?: number; lat?: number
+  hotelCheckInDay?: number; hotelCheckOutDay?: number
+}
+interface AMapSuggestion {
+  id: string; name: string; address: string; district: string
+  lng?: number; lat?: number
 }
 interface Trip {
   id: string; name: string; destination: string
   dateMode: DateMode; days: number; startDate: string; places: Place[]; memos: TripMemo[]
+  memoFolders?: MemoFolder[]; trashedMemoFolders?: TrashedMemoFolder[]
+  travelPreferences?: { shortDistanceKm: number; longDistanceMode: LongDistanceMode }
+  segmentTravelModes?: Record<string, SegmentEstimate["mode"]>
 }
+interface SegmentEstimate { mode: "walking" | "driving" | "transit"; distanceMeters: number; durationSeconds: number; status: "ready" | "unavailable" }
 type DayPlace = Place & Visit & { placeId: string; visitId: string }
 interface TrashedTrip extends Trip { trashedAt: number }
 interface UserProfile { displayName: string }
@@ -64,14 +85,20 @@ const TYPE_BG: Record<PlaceType, string> = {
 const TYPE_COLOR: Record<PlaceType, string> = {
   attraction: "#4F7E35", restaurant: "#C4760E", hotel: "#2B52C4", transport: "#7C35C4", other: "#666",
 }
+const DAY_COLORS = ["#F8DF72", "#9FD8F0", "#B9DFA6", "#F4B7A8", "#CDB9ED", "#F6C98B", "#9FD9D0"]
+const DAY_ROUTE_COLORS = ["#F2C500", "#00A9E0", "#45A834", "#F0446C", "#7543C5", "#E97800", "#009D8C"]
+const dayColor = (day: number) => DAY_COLORS[(Math.max(1, day) - 1) % DAY_COLORS.length]
+const dayRouteColor = (day: number) => DAY_ROUTE_COLORS[(Math.max(1, day) - 1) % DAY_ROUTE_COLORS.length]
 const SEC = "#6F6A61"
 const TERC = "#A9A69F"
+const DEFAULT_TRAVEL_PREFERENCES = { shortDistanceKm: 1, longDistanceMode: "transit" as LongDistanceMode }
 const MEMO_CATEGORIES: { key: MemoCategory; label: string; desc: string; icon: typeof NotebookPen }[] = [
   { key: "preparation", label: "行前准备", desc: "预约、证件与出发前事项", icon: ClipboardCheck },
   { key: "packing", label: "行李清单", desc: "随身物品与打包检查", icon: Luggage },
   { key: "food", label: "美食备忘", desc: "想吃的店和点单提示", icon: Utensils },
   { key: "other", label: "其他笔记", desc: "其余旅行信息", icon: NotebookPen },
 ]
+const DEFAULT_MEMO_FOLDERS: MemoFolder[] = MEMO_CATEGORIES.map(item => ({ id: item.key, title: item.label, desc: item.desc, builtIn: true }))
 
 // ─── Initial Data ─────────────────────────────────────────────────────────────
 
@@ -120,6 +147,8 @@ const cloneTrip = (trip: Trip): Trip => ({
   ...trip,
   places: trip.places.map(place => ({ ...place, coords: { ...place.coords }, visits: place.visits.map(visit => ({ ...visit })) })),
   memos: trip.memos.map(memo => ({ ...memo, items: memo.items.map(item => ({ ...item })) })),
+  memoFolders: trip.memoFolders?.map(folder => ({ ...folder })),
+  trashedMemoFolders: trip.trashedMemoFolders?.map(entry => ({ ...entry, folder: { ...entry.folder }, memos: entry.memos.map(memo => ({ ...memo, items: memo.items.map(item => ({ ...item })) })) })),
 })
 
 const createDefaultData = (): PersistedData => ({
@@ -148,6 +177,9 @@ function isPlaceBase(value: unknown): value is Omit<Place, "visits"> {
     && Number.isFinite(value.coords.x)
     && typeof value.coords.y === "number"
     && Number.isFinite(value.coords.y)
+    && (value.amapPoiId === undefined || typeof value.amapPoiId === "string")
+    && (value.lng === undefined || (typeof value.lng === "number" && Number.isFinite(value.lng)))
+    && (value.lat === undefined || (typeof value.lat === "number" && Number.isFinite(value.lat)))
 }
 
 function isVisit(value: unknown): value is Visit {
@@ -166,13 +198,23 @@ function isPlace(value: unknown): value is Place {
 
 function isTripMemo(value: unknown): value is TripMemo {
   if (!isRecord(value) || !Array.isArray(value.items)) return false
-  const validCategory = ["preparation", "packing", "food", "other"].includes(String(value.category))
+  const validCategory = typeof value.category === "string" && value.category.trim().length > 0
   const validType = value.type === "text" || value.type === "checklist"
   return typeof value.id === "string" && validCategory && validType
     && typeof value.title === "string" && typeof value.content === "string"
     && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
     && value.items.every(item => isRecord(item) && typeof item.id === "string"
       && typeof item.text === "string" && typeof item.completed === "boolean")
+}
+
+function isMemoFolder(value: unknown): value is MemoFolder {
+  return isRecord(value) && typeof value.id === "string" && typeof value.title === "string"
+    && typeof value.desc === "string" && (value.builtIn === undefined || typeof value.builtIn === "boolean")
+}
+
+function isTrashedMemoFolder(value: unknown): value is TrashedMemoFolder {
+  return isRecord(value) && isMemoFolder(value.folder) && Array.isArray(value.memos)
+    && value.memos.every(isTripMemo) && typeof value.trashedAt === "number" && Number.isFinite(value.trashedAt)
 }
 
 function isTrip(value: unknown): value is Trip {
@@ -189,6 +231,8 @@ function isTrip(value: unknown): value is Trip {
     && value.places.every(isPlace)
     && Array.isArray(value.memos)
     && value.memos.every(isTripMemo)
+    && (value.memoFolders === undefined || (Array.isArray(value.memoFolders) && value.memoFolders.every(isMemoFolder)))
+    && (value.trashedMemoFolders === undefined || (Array.isArray(value.trashedMemoFolders) && value.trashedMemoFolders.every(isTrashedMemoFolder)))
 }
 
 function isTrashedTrip(value: unknown): value is TrashedTrip {
@@ -312,11 +356,28 @@ const MOCK_LOCS = [
 const genId = () => `p_${Math.random().toString(36).slice(2, 8)}`
 const genVisitId = () => `v_${Math.random().toString(36).slice(2, 9)}`
 const genMemoId = (prefix = "m") => `${prefix}_${Math.random().toString(36).slice(2, 10)}`
+const hotelVisitPosition = (place: Place, visit: Visit): -1 | 0 | 1 => {
+  if (place.type !== "hotel" || !place.hotelStay) return 0
+  const sameDayVisits = place.visits.filter(item => item.day === visit.day).sort((a, b) => a.order - b.order)
+  const firstVisitId = sameDayVisits[0]?.id
+  const lastVisitId = sameDayVisits[sameDayVisits.length - 1]?.id
+  const isStart = visit.day > place.hotelStay.checkInDay && visit.id === firstVisitId
+  const isEnd = visit.day < place.hotelStay.checkOutDay && visit.id === lastVisitId
+  if (isStart) return -1
+  if (isEnd) return 1
+  return 0
+}
 const getDayPlaces = (places: Place[], day: number) =>
   places.flatMap(place => place.visits
     .filter(visit => visit.day === day)
     .map(visit => ({ ...place, ...visit, placeId: place.id, visitId: visit.id } as DayPlace)))
-    .sort((a, b) => a.order - b.order)
+    .sort((a, b) => {
+      const aPlace = places.find(place => place.id === a.placeId)
+      const bPlace = places.find(place => place.id === b.placeId)
+      const aPosition = aPlace ? hotelVisitPosition(aPlace, a) : 0
+      const bPosition = bPlace ? hotelVisitPosition(bPlace, b) : 0
+      return aPosition - bPosition || a.order - b.order
+    })
 const getPool = (places: Place[]) => places.filter(p => p.visits.length === 0)
 const getVisit = (places: Place[], visitId: string) => {
   for (const place of places) {
@@ -332,6 +393,19 @@ const visitTimeLabel = (visit: Pick<Visit, "arrivalTime" | "durationMinutes">) =
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return visit.arrivalTime
   const end = hours * 60 + minutes + visit.durationMinutes
   return `${visit.arrivalTime}—${String(Math.floor(end / 60) % 24).padStart(2, "0")}:${String(end % 60).padStart(2, "0")}`
+}
+const formatTravelDistance = (meters: number) => meters < 1000 ? `${Math.max(1, Math.round(meters))}米` : `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}公里`
+const formatTravelDuration = (seconds: number) => {
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  return minutes < 60 ? `${minutes}分钟` : `${Math.floor(minutes / 60)}小时${minutes % 60 ? `${minutes % 60}分钟` : ""}`
+}
+const geographicDistanceMeters = (a: DayPlace, b: DayPlace) => {
+  if (![a.lng, a.lat, b.lng, b.lat].every(Number.isFinite)) return Number.NaN
+  const rad = (value: number) => value * Math.PI / 180
+  const dLat = rad(Number(b.lat) - Number(a.lat)); const dLng = rad(Number(b.lng) - Number(a.lng))
+  const lat1 = rad(Number(a.lat)); const lat2 = rad(Number(b.lat))
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
+  return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
 }
 
 function tripDateLabel(t: Trip): string {
@@ -357,6 +431,93 @@ function dayDateSuffix(t: Trip, day: number): string {
 function searchLocs(q: string) {
   if (!q.trim()) return []
   return MOCK_LOCS.filter(r => r.name.includes(q) || r.address.includes(q)).slice(0, 4)
+}
+
+const AMAP_KEY = String(import.meta.env.VITE_AMAP_KEY || "").trim()
+const AMAP_SECURITY_CODE = String(import.meta.env.VITE_AMAP_SECURITY_CODE || "").trim()
+let amapPromise: Promise<any> | null = null
+const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;",
+}[char] || char))
+
+function loadAMap(): Promise<any> {
+  if (!AMAP_KEY || !AMAP_SECURITY_CODE) return Promise.reject(new Error("AMAP_NOT_CONFIGURED"))
+  if (amapPromise) return amapPromise
+  amapPromise = new Promise((resolve, reject) => {
+    const win = window as any
+    win._AMapSecurityConfig = { securityJsCode: AMAP_SECURITY_CODE }
+    const start = () => win.AMapLoader.load({
+      key: AMAP_KEY,
+      version: "2.0",
+      plugins: ["AMap.AutoComplete", "AMap.PlaceSearch", "AMap.ToolBar", "AMap.Scale", "AMap.Driving", "AMap.Walking", "AMap.Transfer"],
+    }).then(resolve).catch(reject)
+    if (win.AMapLoader) { start(); return }
+    const script = document.createElement("script")
+    script.src = "https://webapi.amap.com/loader.js"
+    script.async = true
+    script.onload = start
+    script.onerror = () => reject(new Error("AMAP_LOADER_FAILED"))
+    document.head.appendChild(script)
+  })
+  return amapPromise
+}
+
+async function searchAMapPlaces(keyword: string, city: string): Promise<AMapSuggestion[]> {
+  if (!keyword.trim()) return []
+  const AMap = await loadAMap()
+  return new Promise((resolve, reject) => {
+    const auto = new AMap.AutoComplete({ city: city || "全国", citylimit: false })
+    auto.search(keyword, (status: string, result: any) => {
+      if (status !== "complete") {
+        const rawInfo = typeof result === "string" ? result : (result?.info || result?.message || "")
+        const info = `${String(status || "UNKNOWN").toUpperCase()}_${String(rawInfo || "NO_INFO").toUpperCase()}`
+        reject(new Error(`AMAP_SEARCH_FAILED_${info}`))
+        return
+      }
+      const tips = Array.isArray(result?.tips) ? result.tips : []
+      resolve(tips.filter((tip: any) => tip?.name).slice(0, 8).map((tip: any) => ({
+        id: String(tip.id || ""),
+        name: String(tip.name || ""),
+        address: typeof tip.address === "string" ? tip.address : "",
+        district: String(tip.district || ""),
+        lng: typeof tip.location?.lng === "number" ? tip.location.lng : undefined,
+        lat: typeof tip.location?.lat === "number" ? tip.location.lat : undefined,
+      })))
+    })
+  })
+}
+
+const travelEstimateCache = new Map<string, SegmentEstimate>()
+async function estimateTravelSegment(from: DayPlace, to: DayPlace, destination: string, preferences: Trip["travelPreferences"], forcedMode?: SegmentEstimate["mode"]): Promise<SegmentEstimate> {
+  const straightMeters = geographicDistanceMeters(from, to)
+  if (!Number.isFinite(straightMeters) || !Number.isFinite(from.lng) || !Number.isFinite(from.lat) || !Number.isFinite(to.lng) || !Number.isFinite(to.lat)) {
+    return { mode: "walking", distanceMeters: 0, durationSeconds: 0, status: "unavailable" }
+  }
+  const prefs = preferences || DEFAULT_TRAVEL_PREFERENCES
+  const mode: SegmentEstimate["mode"] = forcedMode || (straightMeters <= prefs.shortDistanceKm * 1000 ? "walking" : prefs.longDistanceMode)
+  const cacheKey = `${mode}:${from.lng},${from.lat}:${to.lng},${to.lat}:${destination}`
+  const cached = travelEstimateCache.get(cacheKey)
+  if (cached) return cached
+  try {
+    const AMap = await loadAMap()
+    const result = await new Promise<any>((resolve, reject) => {
+      const options = { hideMarkers: true, autoFitView: false, city: destination || undefined }
+      const service = mode === "walking"
+        ? new AMap.Walking(options)
+        : mode === "driving"
+          ? new AMap.Driving({ ...options, policy: AMap.DrivingPolicy?.LEAST_TIME, showTraffic: false })
+          : new AMap.Transfer({ ...options, policy: AMap.TransferPolicy?.LEAST_TIME, extensions: "base" })
+      service.search([Number(from.lng), Number(from.lat)], [Number(to.lng), Number(to.lat)], (status: string, data: any) => status === "complete" ? resolve(data) : reject(new Error("AMAP_ESTIMATE_FAILED")))
+    })
+    const route = mode === "transit" ? result?.plans?.[0] : result?.routes?.[0]
+    const estimate: SegmentEstimate = route && Number.isFinite(Number(route.time))
+      ? { mode, distanceMeters: Number(route.distance || straightMeters), durationSeconds: Number(route.time), status: "ready" }
+      : { mode, distanceMeters: straightMeters, durationSeconds: 0, status: "unavailable" }
+    travelEstimateCache.set(cacheKey, estimate)
+    return estimate
+  } catch {
+    return { mode, distanceMeters: straightMeters, durationSeconds: 0, status: "unavailable" }
+  }
 }
 function daysUntilPerm(trashedAt: number): number {
   return Math.max(0, 30 - Math.floor((Date.now() - trashedAt) / 86400000))
@@ -399,8 +560,8 @@ function Sheet({ open, onClose, title, children }:
   if (!open) return null
   return (
     <>
-      <div className="fixed inset-0 bg-black/30 z-30" onClick={onClose} />
-      <div className="fixed bottom-0 inset-x-0 max-w-[390px] mx-auto bg-white rounded-t-3xl z-40 overflow-hidden max-h-[90vh] flex flex-col">
+      <div className="fixed inset-0 bg-black/30" style={{ zIndex: 900 }} onClick={onClose} />
+      <div className="fixed bottom-0 inset-x-0 max-w-[390px] mx-auto bg-white rounded-t-3xl overflow-hidden max-h-[90vh] flex flex-col" style={{ zIndex: 1000 }}>
         <div className="flex justify-center pt-3 pb-1 shrink-0"><div className="w-10 h-1 bg-[#EEE9DC] rounded-full" /></div>
         {title && <div className="px-5 pb-3 shrink-0"><p className="text-[17px] font-semibold text-[#2B2924]">{title}</p></div>}
         <div className="overflow-y-auto flex-1" style={{ scrollbarWidth: "none" }}>{children}</div>
@@ -413,8 +574,8 @@ function Dlg({ cfg, onClose }: { cfg: DelCfg | null; onClose: () => void }) {
   if (!cfg) return null
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-50" onClick={onClose} />
-      <div className="fixed inset-x-6 top-1/2 -translate-y-1/2 bg-white rounded-3xl z-50 p-6 max-w-[358px] mx-auto shadow-2xl">
+      <div className="fixed inset-0 bg-black/40" style={{ zIndex: 1100 }} onClick={onClose} />
+      <div className="fixed inset-x-6 top-1/2 -translate-y-1/2 bg-white rounded-3xl p-6 max-w-[358px] mx-auto shadow-2xl" style={{ zIndex: 1200 }}>
         <h3 className="text-[17px] font-semibold text-[#2B2924] mb-2">{cfg.title}</h3>
         <p className="text-[14px] leading-relaxed mb-6" style={{ color: SEC }}>{cfg.desc}</p>
         <div className="flex gap-3">
@@ -428,8 +589,8 @@ function Dlg({ cfg, onClose }: { cfg: DelCfg | null; onClose: () => void }) {
 
 function Toast({ msg, onUndo, bottom = 24 }: { msg: string; onUndo?: () => void; bottom?: number }) {
   return (
-    <div className="fixed inset-x-4 max-w-[358px] mx-auto bg-[#2B2924] text-white rounded-2xl px-4 py-3 flex items-center gap-3 z-50 shadow-xl"
-      style={{ bottom: `${bottom}px` }}>
+    <div className="fixed inset-x-4 max-w-[358px] mx-auto bg-[#2B2924] text-white rounded-2xl px-4 py-3 flex items-center gap-3 shadow-xl"
+      style={{ bottom: `${bottom}px`, zIndex: 1300 }}>
       <CheckCircle2 size={16} className="shrink-0 text-[#76966F]" />
       <span className="text-[13px] flex-1">{msg}</span>
       {onUndo && <button onClick={onUndo} className="text-[#F8DF72] text-[13px] font-semibold shrink-0">撤销</button>}
@@ -1025,26 +1186,57 @@ function CreateTripScreen({ form, setForm, onBack, onSave }:
 
 // ─── Add / Edit Place Screen ──────────────────────────────────────────────────
 
-function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
-  { form: { name: string; type: PlaceType; note: string; address: string }; setForm: React.Dispatch<React.SetStateAction<{ name: string; type: PlaceType; note: string; address: string }>>; editingId: string | null; onBack: () => void; onSave: (f: { name: string; type: PlaceType; note: string; address: string }) => void }) {
-  const [results, setResults] = useState<typeof MOCK_LOCS>([])
+function AddPlaceScreen({ form, setForm, editingId, destination, tripDays, tripStartDate, tripDateMode, onBack, onSave }:
+  { form: PlaceForm; setForm: React.Dispatch<React.SetStateAction<PlaceForm>>; editingId: string | null; destination: string; tripDays: number; tripStartDate: string; tripDateMode: DateMode; onBack: () => void; onSave: (f: PlaceForm, target: "pool" | "itinerary", day?: number) => void }) {
+  const [results, setResults] = useState<AMapSuggestion[]>([])
   const [showResults, setShowResults] = useState(false)
   const [nameErr, setNameErr] = useState("")
+  const [searchState, setSearchState] = useState<"idle" | "loading" | "ready" | "empty" | "error" | "unconfigured">("idle")
+  const [searchErrorCode, setSearchErrorCode] = useState("")
+  const [daySelectOpen, setDaySelectOpen] = useState(false)
 
   const TYPES: PlaceType[] = ["attraction", "restaurant", "hotel", "transport", "other"]
   const TIconMap: Record<PlaceType, React.ElementType> = { attraction: Landmark, restaurant: Utensils, hotel: Building2, transport: Plane, other: Circle }
+  const hotelDayLabel = (day: number) => {
+    if (tripDateMode !== "confirmed" || !tripStartDate) return `第${day}天`
+    const date = new Date(tripStartDate); date.setDate(date.getDate() + day - 1)
+    return `第${day}天 · ${date.getMonth() + 1}月${date.getDate()}日`
+  }
 
   const handleNameChange = (q: string) => {
-    setForm(f => ({ ...f, name: q, address: "" }))
+    setForm(f => ({ ...f, name: q, address: "", amapPoiId: undefined, lng: undefined, lat: undefined }))
     setNameErr("")
-    setResults(searchLocs(q))
+    setSearchErrorCode("")
     setShowResults(!!q.trim())
+    if (!q.trim()) { setResults([]); setSearchState("idle") }
   }
-  const handleSelect = (r: typeof MOCK_LOCS[0]) => {
-    setForm(f => ({ ...f, name: r.name, address: r.address }))
+  const handleSelect = (r: AMapSuggestion) => {
+    setForm(f => ({ ...f, name: r.name, address: [r.district, r.address].filter(Boolean).join(" "), amapPoiId: r.id || undefined, lng: r.lng, lat: r.lat }))
     setResults([])
     setShowResults(false)
+    setSearchState("ready")
   }
+
+  useEffect(() => {
+    const query = form.name.trim()
+    if (!showResults || !query) return
+    if (!AMAP_KEY || !AMAP_SECURITY_CODE) { setSearchState("unconfigured"); return }
+    let cancelled = false
+    setSearchState("loading")
+    const timer = window.setTimeout(() => {
+      searchAMapPlaces(query, destination).then(items => {
+        if (cancelled) return
+        setResults(items)
+        setSearchState(items.length ? "ready" : "empty")
+      }).catch(error => {
+        if (!cancelled) {
+          const safeCode = String(error?.message || error || "").match(/[A-Z][A-Z0-9_]{3,}/g)?.join(" · ") || "UNKNOWN_ERROR"
+          setResults([]); setSearchErrorCode(safeCode); setSearchState("error")
+        }
+      })
+    }, 350)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [form.name, destination, showResults])
 
   return (
     <div className="flex flex-col h-full bg-[#FFFCF3]">
@@ -1071,9 +1263,10 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
               ))}
             </div>
           )}
-          {showResults && results.length === 0 && (
-            <p className="text-[12px] mt-2 px-1" style={{ color: TERC }}>未找到匹配地点，将只保存名称并暂不设置位置</p>
-          )}
+          {showResults && searchState === "loading" && <p className="text-[12px] mt-2 px-1" style={{ color: TERC }}>正在搜索高德地点…</p>}
+          {showResults && searchState === "unconfigured" && <p className="text-[12px] mt-2 px-1 text-[#C96B58]">地图服务尚未配置，请检查本机环境变量。</p>}
+          {showResults && searchState === "error" && <p className="text-[12px] mt-2 px-1 text-[#C96B58]">高德搜索暂时不可用（{searchErrorCode}），仍可仅保存地点名称。</p>}
+          {showResults && searchState === "empty" && <p className="text-[12px] mt-2 px-1" style={{ color: TERC }}>未找到匹配地点，将只保存名称并暂不设置位置</p>}
           {!showResults && form.address && (
             <div className="mt-2 flex items-start gap-2 px-1">
               <MapPin size={14} className="shrink-0 mt-0.5 text-[#76966F]" />
@@ -1088,7 +1281,11 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
               const Icon = TIconMap[t]
               const active = form.type === t
               return (
-                <button key={t} onClick={() => setForm(f => ({ ...f, type: t }))}
+                <button key={t} onClick={() => setForm(f => ({
+                  ...f, type: t,
+                  hotelCheckInDay: t === "hotel" ? (f.hotelCheckInDay || 1) : undefined,
+                  hotelCheckOutDay: t === "hotel" ? (f.hotelCheckOutDay || Math.min(2, tripDays)) : undefined,
+                }))}
                   className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-2xl border-2 transition-all ${active ? "border-[#F8DF72] bg-[#FFFBE8]" : "border-[#EEE9DC] bg-white"}`}>
                   <Icon size={18} strokeWidth={1.5} style={{ color: active ? "#2B2924" : TERC }} />
                   <span translate="no" lang="zh-CN" className="text-[10px] font-medium" style={{ color: active ? "#2B2924" : TERC }}>{TYPE_LABEL[t]}</span>
@@ -1097,6 +1294,30 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
             })}
           </div>
         </div>
+        {form.type === "hotel" && (
+          <div className="rounded-2xl border border-[#EEE9DC] bg-white p-4">
+            <div className="flex items-center gap-2 mb-3"><CalendarDays size={17} className="text-[#8A7200]" /><p className="text-[14px] font-semibold text-[#2B2924]">住宿日期</p></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[12px] mb-1.5 block" style={{ color: SEC }}>入住</label>
+                <select value={form.hotelCheckInDay || 1} onChange={event => {
+                  const checkIn = Number(event.target.value)
+                  setForm(current => ({ ...current, hotelCheckInDay: checkIn, hotelCheckOutDay: Math.max(checkIn, current.hotelCheckOutDay || checkIn) }))
+                }} className="w-full h-11 rounded-xl border border-[#EEE9DC] bg-[#FFFCF3] px-3 text-[14px] outline-none">
+                  {Array.from({ length: tripDays }, (_, index) => index + 1).map(day => <option key={day} value={day}>{hotelDayLabel(day)}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-[12px] mb-1.5 block" style={{ color: SEC }}>离店</label>
+                <select value={form.hotelCheckOutDay || Math.min(2, tripDays)} onChange={event => setForm(current => ({ ...current, hotelCheckOutDay: Number(event.target.value) }))}
+                  className="w-full h-11 rounded-xl border border-[#EEE9DC] bg-[#FFFCF3] px-3 text-[14px] outline-none">
+                  {Array.from({ length: tripDays }, (_, index) => index + 1).filter(day => day >= (form.hotelCheckInDay || 1)).map(day => <option key={day} value={day}>{hotelDayLabel(day)}</option>)}
+                </select>
+              </div>
+            </div>
+            <p className="text-[11px] leading-relaxed mt-3" style={{ color: TERC }}>入住日放在行程末尾，住宿期间作为每日起终点，离店日放在行程开头。</p>
+          </div>
+        )}
         <div>
           <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>备注（选填）</label>
           <textarea value={form.note} onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
@@ -1105,11 +1326,39 @@ function AddPlaceScreen({ form, setForm, editingId, onBack, onSave }:
         </div>
       </div>
       <div className="px-4 pb-10 pt-3 shrink-0">
-        <Btn variant="primary" className="w-full" disabled={!form.name.trim()}
-          onClick={() => { if (!form.name.trim()) { setNameErr("请输入地点名称"); return } onSave(form) }}>
-          {editingId ? "保存修改" : "保存到待安排池"}
-        </Btn>
+        {editingId ? (
+          <Btn variant="primary" className="w-full" disabled={!form.name.trim()}
+            onClick={() => { if (!form.name.trim()) { setNameErr("请输入地点名称"); return } onSave(form, "pool") }}>
+            保存修改
+          </Btn>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Btn variant="secondary" className="w-full" disabled={!form.name.trim()}
+              onClick={() => { if (!form.name.trim()) { setNameErr("请输入地点名称"); return } onSave(form, "pool") }}>
+              保存到待安排池
+            </Btn>
+            <Btn variant="primary" className="w-full" disabled={!form.name.trim()}
+              onClick={() => {
+                if (!form.name.trim()) { setNameErr("请输入地点名称"); return }
+                if (form.type === "hotel") onSave(form, "itinerary", form.hotelCheckInDay || 1)
+                else setDaySelectOpen(true)
+              }}>
+              {form.type === "hotel" ? "保存并加入行程" : "添加到行程"}
+            </Btn>
+          </div>
+        )}
       </div>
+      <Sheet open={daySelectOpen} onClose={() => setDaySelectOpen(false)} title="添加到哪一天？">
+        <div className="px-4 pb-7 grid grid-cols-3 gap-3">
+          {Array.from({ length: tripDays }, (_, index) => index + 1).map(day => (
+            <button key={day} onClick={() => { setDaySelectOpen(false); onSave(form, "itinerary", day) }}
+              className="h-12 rounded-2xl border border-[#EEE9DC] bg-[#FFFCF3] text-[14px] font-semibold active:scale-[0.97] transition-transform"
+              style={{ color: "#2B2924" }}>
+              第{day}天
+            </button>
+          ))}
+        </div>
+      </Sheet>
     </div>
   )
 }
@@ -1123,8 +1372,10 @@ function TripSettingsScreen({ trip, onBack, onUpdate, setDlg, onDeleteDay, onSof
   const [dateMode,  setDateMode]  = useState<DateMode>(trip.dateMode)
   const [days,      setDays]      = useState(trip.days)
   const [startDate, setStartDate] = useState(trip.startDate)
+  const [shortDistanceKm, setShortDistanceKm] = useState(trip.travelPreferences?.shortDistanceKm || DEFAULT_TRAVEL_PREFERENCES.shortDistanceKm)
+  const [longDistanceMode, setLongDistanceMode] = useState<LongDistanceMode>(trip.travelPreferences?.longDistanceMode || DEFAULT_TRAVEL_PREFERENCES.longDistanceMode)
 
-  const save = () => onUpdate({ ...trip, name, destination: dest, dateMode, days, startDate })
+  const save = () => onUpdate({ ...trip, name, destination: dest, dateMode, days, startDate, travelPreferences: { shortDistanceKm, longDistanceMode } })
 
   return (
     <div className="flex flex-col h-full bg-[#FFFCF3]">
@@ -1227,6 +1478,30 @@ function TripSettingsScreen({ trip, onBack, onUpdate, setDlg, onDeleteDay, onSof
             </div>
           </div>
         )}
+        <div>
+          <label className="text-[13px] mb-1.5 block" style={{ color: SEC }}>行程交通偏好</label>
+          <div className="bg-white rounded-2xl border border-[#EEE9DC] p-4 flex flex-col gap-4">
+            <div>
+              <p className="text-[13px] font-medium text-[#2B2924]">短距离优先步行</p>
+              <p className="text-[11px] mt-1 mb-2" style={{ color: TERC }}>地点间直线距离不超过该范围时查询步行路线</p>
+              <select value={shortDistanceKm} onChange={event => setShortDistanceKm(Number(event.target.value))}
+                className="w-full h-11 rounded-xl bg-[#FFFCF3] border border-[#EEE9DC] px-3 text-[14px] outline-none">
+                {[0.5, 1, 1.5, 2, 3].map(value => <option key={value} value={value}>{value}公里以内步行</option>)}
+              </select>
+            </div>
+            <div>
+              <p className="text-[13px] font-medium text-[#2B2924] mb-2">超过步行范围后</p>
+              <div className="grid grid-cols-2 gap-2">
+                {(["transit", "driving"] as LongDistanceMode[]).map(mode => (
+                  <button key={mode} onClick={() => setLongDistanceMode(mode)}
+                    className={`h-11 rounded-xl border text-[13px] font-semibold flex items-center justify-center gap-2 ${longDistanceMode === mode ? "border-[#E4C641] bg-[#FFF6CC]" : "border-[#EEE9DC] bg-[#FFFCF3]"}`}>
+                    {mode === "transit" ? <Bus size={16} /> : <Car size={16} />}{mode === "transit" ? "公共交通" : "驾车"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
         {/* Soft delete — 移入回收站 */}
         <div className="mt-2">
           <button onClick={onSoftDeleteTrip}
@@ -1304,8 +1579,22 @@ function PlacePoolTab({ trip, filter, setFilter, onAdd, onArrange, onActions, on
 
 // ─── Itinerary Tab ────────────────────────────────────────────────────────────
 
-function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReorder, onEnterReorder, onCancelReorder, onDoneReorder, expandedId, setExpandedId, onAddOptions, onActions, onReorder, showToast }:
-  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (visitId: string) => void; onReorder: (orderedVisitIds: string[]) => void; showToast: (msg: string, undo?: () => void) => void }) {
+function TravelEstimateRow({ estimate, loading, onOpen }: { estimate?: SegmentEstimate; loading: boolean; onOpen: () => void }) {
+  const mode = estimate?.mode || "walking"
+  const Icon = mode === "walking" ? Footprints : mode === "driving" ? Car : Bus
+  const label = mode === "walking" ? "步行" : mode === "driving" ? "驾车" : "公共交通"
+  return <button type="button" onClick={onOpen} className="ml-8 my-1 min-h-8 flex items-center gap-2 text-[11px] text-left active:opacity-60" style={{ color: TERC }}>
+    <div className="h-8 w-px bg-[#DDD7CA]" />
+    <Icon size={14} className="shrink-0" />
+    {loading ? <span>正在估算…</span> : estimate?.status === "ready"
+      ? <span>{label} · {formatTravelDistance(estimate.distanceMeters)} · 约{formatTravelDuration(estimate.durationSeconds)}</span>
+      : <span>{label} · 暂无法估算</span>}
+    <ChevronRight size={13} className="shrink-0" />
+  </button>
+}
+
+function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReorder, onEnterReorder, onCancelReorder, onDoneReorder, expandedId, setExpandedId, onAddOptions, onActions, onReorder, onTravelModeChange, showToast }:
+  { trip: Trip; selectedDay: number; setSelectedDay: (d: number) => void; view: ItvView; setView: (v: ItvView) => void; isReorder: boolean; onEnterReorder: () => void; onCancelReorder: () => void; onDoneReorder: () => void; expandedId: string | null; setExpandedId: (id: string | null) => void; onAddOptions: () => void; onActions: (visitId: string) => void; onReorder: (orderedVisitIds: string[]) => void; onTravelModeChange: (key: string, mode: SegmentEstimate["mode"]) => void; showToast: (msg: string, undo?: () => void) => void }) {
   const dayPlaces  = getDayPlaces(trip.places, selectedDay)
   const hasAnyPlace = trip.places.length > 0
   const [dragVisitId, setDragVisitId] = useState<string | null>(null)
@@ -1319,6 +1608,43 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
   const dragCardRef = useRef<HTMLDivElement | null>(null)
   const lastDropTargetRef = useRef<string | null>(null)
   const finalDropTargetRef = useRef<string | null>(null)
+  const [travelEstimates, setTravelEstimates] = useState<Record<string, SegmentEstimate>>({})
+  const [estimatingTravel, setEstimatingTravel] = useState(false)
+  const [travelPicker, setTravelPicker] = useState<{ open: boolean; fromIndex: number }>({ open: false, fromIndex: 0 })
+  const [travelAlternatives, setTravelAlternatives] = useState<Partial<Record<SegmentEstimate["mode"], SegmentEstimate>>>({})
+  const [loadingAlternatives, setLoadingAlternatives] = useState(false)
+  const travelSignature = dayPlaces.map(place => `${place.visitId}:${place.lng || ""},${place.lat || ""}`).join("|")
+  const segmentKey = (from: DayPlace, to: DayPlace) => `${from.visitId}->${to.visitId}`
+  useEffect(() => {
+    let cancelled = false
+    if (dayPlaces.length < 2) { setTravelEstimates({}); setEstimatingTravel(false); return }
+    setEstimatingTravel(true)
+    Promise.all(dayPlaces.slice(0, -1).map((place, index) =>
+      estimateTravelSegment(place, dayPlaces[index + 1], trip.destination, trip.travelPreferences, trip.segmentTravelModes?.[segmentKey(place, dayPlaces[index + 1])])
+        .then(estimate => [place.visitId, estimate] as const)
+    )).then(entries => {
+      if (!cancelled) { setTravelEstimates(Object.fromEntries(entries)); setEstimatingTravel(false) }
+    })
+    return () => { cancelled = true }
+  }, [selectedDay, travelSignature, trip.destination, trip.travelPreferences?.shortDistanceKm, trip.travelPreferences?.longDistanceMode, JSON.stringify(trip.segmentTravelModes || {})])
+  const openTravelPicker = (fromIndex: number) => {
+    const from = dayPlaces[fromIndex]; const to = dayPlaces[fromIndex + 1]
+    if (!from || !to) return
+    setTravelPicker({ open: true, fromIndex }); setTravelAlternatives({}); setLoadingAlternatives(true)
+    Promise.all((["walking", "transit", "driving"] as SegmentEstimate["mode"][]).map(mode =>
+      estimateTravelSegment(from, to, trip.destination, trip.travelPreferences, mode).then(result => [mode, result] as const)
+    )).then(entries => {
+      setTravelAlternatives(Object.fromEntries(entries)); setLoadingAlternatives(false)
+    }).catch(() => {
+      setTravelAlternatives({}); setLoadingAlternatives(false)
+    })
+  }
+  const travelPickerFrom = dayPlaces[travelPicker.fromIndex]
+  const travelPickerTo = dayPlaces[travelPicker.fromIndex + 1]
+  const travelPickerKey = travelPickerFrom && travelPickerTo ? segmentKey(travelPickerFrom, travelPickerTo) : ""
+  const selectedTravelMode = travelPickerKey
+    ? (trip.segmentTravelModes?.[travelPickerKey] || travelEstimates[travelPickerFrom.visitId]?.mode)
+    : undefined
   useEffect(() => {
     const next = isReorder ? dayPlaces.map(place => place.visitId) : []
     draftVisitOrderRef.current = next
@@ -1565,9 +1891,7 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
                     <MoreHorizontal size={17} style={{ color: TERC }} />
                   </button>
                 </div>
-                {idx < dayPlaces.length - 1 && (
-                  <div className="ml-8 h-4 border-l-2 border-dashed border-[#EEE9DC]" />
-                )}
+                {idx < dayPlaces.length - 1 && <TravelEstimateRow estimate={travelEstimates[place.visitId]} loading={estimatingTravel && !travelEstimates[place.visitId]} onOpen={() => openTravelPicker(idx)} />}
               </div>
             ))}
           </div>
@@ -1606,21 +1930,75 @@ function ItineraryTab({ trip, selectedDay, setSelectedDay, view, setView, isReor
           <Plus size={16} /> 添加地点
         </button>
       </div>
+      <Sheet open={travelPicker.open} onClose={() => setTravelPicker(current => ({ ...current, open: false }))} title="选择交通方式">
+        <div className="px-5 pb-7">
+          {travelPickerFrom && travelPickerTo && (
+            <>
+              <p className="text-[13px] mb-4 truncate" style={{ color: SEC }}>
+                {travelPickerFrom.name} → {travelPickerTo.name}
+              </p>
+              <div className="flex flex-col gap-2">
+                {([
+                  { mode: "walking" as const, label: "步行", Icon: Footprints },
+                  { mode: "transit" as const, label: "公共交通", Icon: Bus },
+                  { mode: "driving" as const, label: "驾车", Icon: Car },
+                ]).map(({ mode, label, Icon }) => {
+                  const estimate = travelAlternatives[mode]
+                  const active = selectedTravelMode === mode
+                  const unavailable = !loadingAlternatives && estimate?.status !== "ready"
+                  return (
+                    <button key={mode} type="button" disabled={loadingAlternatives || unavailable}
+                      onClick={() => {
+                        if (!estimate || estimate.status !== "ready" || !travelPickerKey) return
+                        onTravelModeChange(travelPickerKey, mode)
+                        setTravelEstimates(current => ({ ...current, [travelPickerFrom.visitId]: estimate }))
+                        setTravelPicker(current => ({ ...current, open: false }))
+                        showToast(`已改为${label}`)
+                      }}
+                      className={`w-full min-h-16 rounded-2xl border px-4 py-3 flex items-center gap-3 text-left transition-colors disabled:opacity-45 ${active ? "border-[#E4C641] bg-[#FFF8D8]" : "border-[#EEE9DC] bg-white active:bg-[#FFFCF3]"}`}>
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${active ? "bg-[#F8DF72]" : "bg-[#F7F4EA]"}`}>
+                        <Icon size={19} style={{ color: active ? "#2B2924" : SEC }} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[15px] font-semibold text-[#2B2924]">{label}</p>
+                        <p className="text-[12px] mt-0.5" style={{ color: TERC }}>
+                          {loadingAlternatives ? "正在估算…" : estimate?.status === "ready"
+                            ? `${formatTravelDistance(estimate.distanceMeters)} · 约${formatTravelDuration(estimate.durationSeconds)}`
+                            : "当前路线暂不可用"}
+                        </p>
+                      </div>
+                      {active && <span className="text-[12px] font-medium text-[#8A7200]">当前</span>}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[11px] mt-4 leading-relaxed" style={{ color: TERC }}>仅修改这一段行程，其他地点之间的交通方式保持不变。</p>
+            </>
+          )}
+        </div>
+      </Sheet>
     </div>
   )
 }
 
 // ─── Memo Tab ─────────────────────────────────────────────────────────────────
 
-function MemoTab({ trip, onChange, showToast }:
-  { trip: Trip; onChange: (memos: TripMemo[]) => void; showToast: (msg: string) => void }) {
+function MemoTab({ trip, onChange, onFoldersChange, onTrashChange, showToast }:
+  { trip: Trip; onChange: (memos: TripMemo[]) => void; onFoldersChange: (folders: MemoFolder[]) => void; onTrashChange: (trash: TrashedMemoFolder[]) => void; showToast: (msg: string) => void }) {
   const [category, setCategory] = useState<MemoCategory | null>(null)
   const [typePickerOpen, setTypePickerOpen] = useState(false)
+  const [folderCreateOpen, setFolderCreateOpen] = useState(false)
+  const [folderName, setFolderName] = useState("")
+  const [trashOpen, setTrashOpen] = useState(false)
   const [editor, setEditor] = useState<{ open: boolean; id: string | null; type: MemoType; title: string; content: string; items: ChecklistItem[] }>({
     open: false, id: null, type: "text", title: "", content: "", items: [],
   })
 
-  const categoryInfo = MEMO_CATEGORIES.find(item => item.key === category)
+  const inferredCustomFolders = [...new Set(trip.memos.map(memo => memo.category).filter(value => value.startsWith("custom_")))]
+    .map(id => ({ id, title: trip.memos.find(memo => memo.category === id)?.title || "自定义备忘", desc: "自定义文件夹" }))
+  const folders = trip.memoFolders || [...DEFAULT_MEMO_FOLDERS, ...inferredCustomFolders]
+  const activeTrash = (trip.trashedMemoFolders || []).filter(entry => Date.now() - entry.trashedAt < 30 * 86400000)
+  const categoryInfo = folders.find(item => item.id === category)
   const categoryMemos = category ? trip.memos.filter(memo => memo.category === category).sort((a, b) => b.updatedAt - a.updatedAt) : []
   const changeMemo = (memoId: string, fn: (memo: TripMemo) => TripMemo) =>
     onChange(trip.memos.map(memo => memo.id === memoId ? fn(memo) : memo))
@@ -1655,27 +2033,63 @@ function MemoTab({ trip, onChange, showToast }:
     onChange(trip.memos.filter(item => item.id !== memo.id))
     showToast("备忘已删除")
   }
+  const createFolder = () => {
+    const title = folderName.trim()
+    if (!title) return
+    const folder: MemoFolder = { id: `custom_${genMemoId("folder")}`, title, desc: "自定义文件夹" }
+    onFoldersChange([...folders, folder])
+    setFolderCreateOpen(false); setFolderName("")
+    showToast("文件夹已创建")
+  }
+  const deleteCurrentFolder = () => {
+    if (!category || !categoryInfo || !window.confirm(`确定删除“${categoryInfo.title}”文件夹吗？`)) return
+    const folderMemos = trip.memos.filter(memo => memo.category === category)
+    onTrashChange([...activeTrash, { folder: { ...categoryInfo }, memos: folderMemos.map(memo => ({ ...memo, items: memo.items.map(item => ({ ...item })) })), trashedAt: Date.now() }])
+    onFoldersChange(folders.filter(folder => folder.id !== category))
+    onChange(trip.memos.filter(memo => memo.category !== category))
+    setCategory(null)
+    showToast("文件夹已移入回收站")
+  }
+  const restoreFolder = (entry: TrashedMemoFolder) => {
+    onFoldersChange([...folders.filter(folder => folder.id !== entry.folder.id), entry.folder])
+    onChange([...trip.memos.filter(memo => memo.category !== entry.folder.id), ...entry.memos])
+    onTrashChange(activeTrash.filter(value => value.trashedAt !== entry.trashedAt))
+    showToast("文件夹已恢复")
+  }
 
   if (!category) {
     return (
+      <>
       <div className="flex flex-col h-full overflow-y-auto px-4 pt-3 pb-5" style={{ scrollbarWidth: "none" }}>
-        <div className="mb-4">
-          <h2 className="text-[20px] font-bold text-[#2B2924]">备忘</h2>
-          <p className="text-[12px] mt-1" style={{ color: SEC }}>把行前信息、清单和零散想法放在当前旅行中</p>
+        <div className="mb-4 flex items-start gap-3">
+          <div className="flex-1">
+            <h2 className="text-[20px] font-bold text-[#2B2924]">备忘</h2>
+            <p className="text-[12px] mt-1 leading-relaxed" style={{ color: SEC }}>创建文件夹后，再添加文字笔记或清单</p>
+          </div>
+          <button onClick={() => setTrashOpen(true)} aria-label="备忘回收站"
+            className="w-11 h-11 rounded-full bg-white border border-[#EEE9DC] flex items-center justify-center shadow-sm active:scale-95 transition-transform shrink-0">
+            <Trash2 size={19} strokeWidth={1.8} style={{ color: SEC }} />
+          </button>
+          <button onClick={() => setFolderCreateOpen(true)} aria-label="新建文件夹"
+            className="w-11 h-11 rounded-full bg-[#F8DF72] flex items-center justify-center shadow-md active:scale-95 transition-transform shrink-0">
+            <Plus size={22} strokeWidth={2.4} />
+          </button>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          {MEMO_CATEGORIES.map(({ key, label, desc, icon: Icon }) => {
-            const memos = trip.memos.filter(memo => memo.category === key)
+          {folders.map(folder => {
+            const preset = MEMO_CATEGORIES.find(item => item.key === folder.id)
+            const Icon = preset?.icon || NotebookPen
+            const memos = trip.memos.filter(memo => memo.category === folder.id)
             const checklistItems = memos.filter(memo => memo.type === "checklist").flatMap(memo => memo.items)
             const completed = checklistItems.filter(item => item.completed).length
             return (
-              <button key={key} onClick={() => setCategory(key)}
+              <button key={folder.id} onClick={() => setCategory(folder.id)}
                 className="min-h-36 bg-white rounded-3xl border border-[#EEE9DC] p-4 text-left active:scale-[0.98] transition-transform shadow-[0_2px_8px_rgba(43,41,36,0.05)]">
                 <div className="w-10 h-10 rounded-2xl bg-[#F7E8AA] flex items-center justify-center mb-4">
                   <Icon size={20} strokeWidth={1.6} className="text-[#2B2924]" />
                 </div>
-                <p className="text-[16px] font-semibold text-[#2B2924]">{label}</p>
-                <p className="text-[11px] leading-relaxed mt-1" style={{ color: SEC }}>{desc}</p>
+                <p className="text-[16px] font-semibold text-[#2B2924] truncate">{folder.title}</p>
+                <p className="text-[11px] leading-relaxed mt-1" style={{ color: SEC }}>{folder.desc}</p>
                 <p className="text-[11px] mt-3" style={{ color: TERC }}>
                   {memos.length === 0 ? "暂无内容" : checklistItems.length > 0 ? `${memos.length}条内容 · 已完成${completed}/${checklistItems.length}` : `${memos.length}条内容`}
                 </p>
@@ -1684,6 +2098,28 @@ function MemoTab({ trip, onChange, showToast }:
           })}
         </div>
       </div>
+      <Sheet open={folderCreateOpen} onClose={() => setFolderCreateOpen(false)} title="新建文件夹">
+        <div className="px-5 pb-7">
+          <label className="block text-[13px] font-medium mb-2">文件夹名称</label>
+          <input value={folderName} autoFocus maxLength={20} onChange={event => setFolderName(event.target.value)} placeholder="例如：酒店信息"
+            className="w-full h-12 rounded-2xl border border-[#E5DFD0] bg-[#FFFCF3] px-4 text-[15px] outline-none focus:border-[#E4C641] mb-5" />
+          <Btn variant="primary" className="w-full" disabled={!folderName.trim()} onClick={createFolder}>创建文件夹</Btn>
+        </div>
+      </Sheet>
+      <Sheet open={trashOpen} onClose={() => setTrashOpen(false)} title="备忘回收站">
+        <div className="px-4 pb-7">
+          {activeTrash.length === 0 ? <p className="py-10 text-center text-[13px]" style={{ color: TERC }}>回收站为空</p> : activeTrash.map(entry => {
+            const remain = Math.max(1, 30 - Math.floor((Date.now() - entry.trashedAt) / 86400000))
+            return <div key={`${entry.folder.id}-${entry.trashedAt}`} className="flex items-center gap-3 py-3 border-b border-[#EEE9DC] last:border-0">
+              <div className="w-10 h-10 rounded-2xl bg-[#F7E8AA] flex items-center justify-center"><NotebookPen size={18} /></div>
+              <div className="flex-1 min-w-0"><p className="text-[14px] font-semibold truncate">{entry.folder.title}</p><p className="text-[11px]" style={{ color: TERC }}>{entry.memos.length}条内容 · {remain}天后永久删除</p></div>
+              <button onClick={() => restoreFolder(entry)} className="px-3 h-9 rounded-xl bg-[#F8DF72] text-[12px] font-semibold">恢复</button>
+              <button onClick={() => { if (window.confirm("永久删除该文件夹吗？")) onTrashChange(activeTrash.filter(value => value.trashedAt !== entry.trashedAt)) }} className="w-9 h-9 rounded-xl flex items-center justify-center active:bg-[#FFF0EC]"><Trash2 size={15} className="text-[#C96B58]" /></button>
+            </div>
+          })}
+        </div>
+      </Sheet>
+      </>
     )
   }
 
@@ -1694,9 +2130,12 @@ function MemoTab({ trip, onChange, showToast }:
           <ChevronLeft size={21} style={{ color: SEC }} />
         </button>
         <div className="flex-1">
-          <h2 className="text-[18px] font-bold text-[#2B2924]">{categoryInfo?.label}</h2>
+          <h2 className="text-[18px] font-bold text-[#2B2924]">{categoryInfo?.title || "备忘文件夹"}</h2>
           <p className="text-[11px]" style={{ color: SEC }}>{categoryMemos.length} 条内容</p>
         </div>
+        <button onClick={deleteCurrentFolder} aria-label="删除文件夹" className="w-10 h-10 rounded-full bg-white border border-[#EEE9DC] flex items-center justify-center active:scale-95">
+          <Trash2 size={17} className="text-[#C96B58]" />
+        </button>
         <button onClick={() => setTypePickerOpen(true)} className="w-10 h-10 rounded-full bg-[#F8DF72] flex items-center justify-center active:scale-95">
           <Plus size={20} strokeWidth={2.4} />
         </button>
@@ -1785,6 +2224,148 @@ function MemoTab({ trip, onChange, showToast }:
 
 // ─── Map Tab ──────────────────────────────────────────────────────────────────
 
+function AMapCanvas({ places, destination, selectedId, routeDay, overview, onSelect }:
+  { places: Place[]; destination: string; selectedId: string | null; routeDay?: number; overview: boolean; onSelect: (id: string) => void }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<any>(null)
+  const markersRef = useRef<any[]>([])
+  const routeRefs = useRef<any[]>([])
+  const routeCacheRef = useRef<Map<string, any[]>>(new Map())
+  const [mapError, setMapError] = useState("")
+  const [mapReady, setMapReady] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    loadAMap().then(async AMap => {
+      if (cancelled || !containerRef.current) return
+      const firstLocated = places.find(place => Number.isFinite(place.lng) && Number.isFinite(place.lat))
+      mapRef.current = new AMap.Map(containerRef.current, {
+        zoom: firstLocated ? 13 : 11,
+        center: firstLocated ? [firstLocated.lng, firstLocated.lat] : [116.397428, 39.90923],
+        viewMode: "2D", resizeEnable: true,
+        mapStyle: "amap://styles/whitesmoke",
+        features: ["bg", "point", "road"],
+      })
+      mapRef.current.addControl(new AMap.ToolBar({ position: "RB" }))
+      mapRef.current.addControl(new AMap.Scale())
+      if (destination) mapRef.current.setCity(destination)
+      setMapReady(true)
+      window.setTimeout(() => mapRef.current?.resize?.(), 100)
+    }).catch(error => {
+      if (!cancelled) setMapError(error?.message === "AMAP_NOT_CONFIGURED" ? "地图服务尚未配置" : "高德地图加载失败，请检查 Key、安全密钥和域名设置")
+    })
+    return () => {
+      cancelled = true
+      markersRef.current.forEach(marker => marker.setMap?.(null))
+      markersRef.current = []
+      routeRefs.current.forEach(route => route.setMap?.(null))
+      routeRefs.current = []
+      mapRef.current?.destroy?.()
+      mapRef.current = null
+    }
+  }, [destination])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!mapReady) return
+    loadAMap().then(async AMap => {
+      if (cancelled || !mapRef.current) return
+      mapRef.current.setFeatures(overview ? ["bg", "road"] : ["bg", "point", "road"])
+      markersRef.current.forEach(marker => marker.setMap?.(null))
+      routeRefs.current.forEach(route => route.setMap?.(null))
+      routeRefs.current = []
+      const routeDays = [...new Set(places.flatMap(place => place.visits.map(visit => visit.day)))]
+        .filter(day => routeDay === undefined || day === routeDay)
+        .sort((a, b) => a - b)
+      const routeGroups = routeDays.map(day => ({
+        day,
+        stops: places.flatMap(place => place.visits
+          .filter(visit => visit.day === day && Number.isFinite(place.lng) && Number.isFinite(place.lat))
+          .map(visit => ({ place, visit })))
+          .sort((a, b) => a.visit.order - b.visit.order),
+      })).filter(group => group.stops.length > 1)
+
+      await Promise.all(routeGroups.map(async group => {
+        const signature = `${group.day}:${group.stops.map(({ place }) => `${place.lng},${place.lat}`).join("|")}`
+        let path = routeCacheRef.current.get(signature)
+        if (!path) {
+          path = await new Promise<any[]>((resolve, reject) => {
+            const driving = new AMap.Driving({
+              policy: AMap.DrivingPolicy?.LEAST_TIME,
+              hideMarkers: true,
+              showTraffic: false,
+              autoFitView: false,
+            })
+            const points = group.stops.map(({ place }) => [place.lng, place.lat])
+            driving.search(points[0], points[points.length - 1], { waypoints: points.slice(1, -1) }, (status: string, result: any) => {
+              if (status !== "complete" || !result?.routes?.[0]) { reject(new Error("AMAP_ROUTE_FAILED")); return }
+              const routePath = result.routes[0].steps?.flatMap((step: any) => Array.isArray(step.path) ? step.path : []) || []
+              routePath.length > 1 ? resolve(routePath) : reject(new Error("AMAP_ROUTE_EMPTY"))
+            })
+          }).catch(() => [])
+          if (path.length) routeCacheRef.current.set(signature, path)
+        }
+        if (cancelled || !mapRef.current || path.length < 2) return
+        const route = new AMap.Polyline({
+          path,
+          strokeColor: dayRouteColor(group.day),
+          strokeWeight: 7,
+          strokeOpacity: 1,
+          isOutline: true,
+          outlineColor: "rgba(255,255,255,.92)",
+          borderWeight: 2,
+          lineJoin: "round",
+          lineCap: "round",
+          showDir: true,
+          zIndex: 80,
+        })
+        route.setMap(mapRef.current)
+        routeRefs.current.push(route)
+      }))
+      markersRef.current = places.filter(place => Number.isFinite(place.lng) && Number.isFinite(place.lat)).map(place => {
+        const selected = place.id === selectedId
+        const scheduledDays = [...new Set(place.visits.map(visit => visit.day))].sort((a, b) => a - b)
+        const isPool = scheduledDays.length === 0
+        const sortedVisits = [...place.visits].sort((a, b) => a.day - b.day || a.order - b.order)
+        const dayVisit = routeDay ? sortedVisits.find(visit => visit.day === routeDay) : sortedVisits[0]
+        const markerText = dayVisit ? String(dayVisit.order) : ""
+        const markerColor = dayVisit ? dayRouteColor(dayVisit.day) : "#FFFFFF"
+        const circleStyle = isPool
+          ? "background:#fff;border:3px solid #A9A69F;color:#A9A69F"
+          : `background:${markerColor};border:2.5px solid rgba(255,255,255,.96);color:#FFFFFF;box-shadow:0 3px 9px rgba(43,41,36,.30)`
+        const inner = isPool ? '<span style="display:block;width:7px;height:7px;border-radius:50%;background:#A9A69F"></span>' : escapeHtml(markerText)
+        const namePill = selected
+          ? `<div style="position:absolute;left:50%;bottom:36px;transform:translateX(-50%);padding:5px 9px;border-radius:10px;background:#fff;border:1px solid #E5DFD0;font-size:12px;font-weight:600;white-space:nowrap;box-shadow:0 3px 10px rgba(0,0,0,.16);color:#2B2924">${escapeHtml(place.name)}</div>`
+          : ""
+        const marker = new AMap.Marker({
+          position: [place.lng, place.lat], title: place.name, anchor: "bottom-center",
+          content: `<div style="position:relative;width:34px;height:42px;display:flex;align-items:flex-start;justify-content:center;filter:${selected ? "drop-shadow(0 4px 6px rgba(0,0,0,.32))" : "none"}">${namePill}<div style="width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:700 12px/1 sans-serif;box-sizing:border-box;${circleStyle}">${inner}</div><div style="position:absolute;top:28px;width:2px;height:10px;background:${isPool ? "#A9A69F" : markerColor}"></div></div>`,
+          zIndex: selected ? 220 : 120,
+        })
+        marker.on("click", () => onSelect(place.id))
+        marker.setMap(mapRef.current)
+        return marker
+      })
+      const selectedPlace = selectedId ? places.find(place => place.id === selectedId) : null
+      if (selectedPlace && Number.isFinite(selectedPlace.lng) && Number.isFinite(selectedPlace.lat)) {
+        mapRef.current.setZoomAndCenter(16, [selectedPlace.lng, selectedPlace.lat], false, 260)
+      } else {
+        const fitOverlays = [...markersRef.current, ...routeRefs.current]
+        if (fitOverlays.length) mapRef.current.setFitView(fitOverlays, false, [72, 36, 100, 36], 16)
+        if (overview && mapRef.current.getZoom?.() > 11.5) mapRef.current.setZoom(11.5, false, 260)
+      }
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [places, selectedId, routeDay, overview, onSelect, mapReady])
+
+  return <div className="absolute inset-0">
+    <div ref={containerRef} className="absolute inset-0" style={{ width: "100%", height: "100%", minHeight: 320 }} />
+    {mapError && <div className="absolute inset-0 flex items-center justify-center bg-[#EEEAE2] px-8 text-center text-[13px]" style={{ color: SEC }}>{mapError}</div>}
+    {!mapError && places.length > 0 && places.every(place => !Number.isFinite(place.lng) || !Number.isFinite(place.lat)) &&
+      <div className="absolute top-16 inset-x-6 rounded-2xl bg-white/95 px-4 py-3 text-[12px] shadow-md z-10" style={{ color: SEC }}>现有地点尚未关联高德位置。重新搜索并选择地点后，标记会显示在地图上。</div>}
+  </div>
+}
+
 function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, selectedId, setSelectedId }:
   { trip: Trip; filter: "all" | "pool" | number; setFilter: (f: "all" | "pool" | number) => void; listOpen: boolean; setListOpen: (v: boolean) => void; onMarker: (id: string) => void; selectedId: string | null; setSelectedId: (id: string | null) => void }) {
   const daysWithPlaces = [...new Set(trip.places.flatMap(p => p.visits.map(v => v.day)))].sort((a, b) => a - b)
@@ -1795,7 +2376,20 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
   ]
   const visible = (p: Place) => filter === "all" || (filter === "pool" && p.visits.length === 0) || (typeof filter === "number" && p.visits.some(v => v.day === filter))
 
-  const visiblePlaces = trip.places.filter(visible)
+  const visiblePlaces = trip.places.filter(visible).sort((a, b) => {
+    if (filter === "pool") return 0
+    const visitA = typeof filter === "number"
+      ? a.visits.find(visit => visit.day === filter)
+      : [...a.visits].sort((x, y) => x.day - y.day || x.order - y.order)[0]
+    const visitB = typeof filter === "number"
+      ? b.visits.find(visit => visit.day === filter)
+      : [...b.visits].sort((x, y) => x.day - y.day || x.order - y.order)[0]
+    if (!visitA && !visitB) return 0
+    if (!visitA) return 1
+    if (!visitB) return -1
+    return visitA.day - visitB.day || visitA.order - visitB.order
+  })
+  const hasRealMap = Boolean(AMAP_KEY && AMAP_SECURITY_CODE)
   let barLabel = ""
   if (filter === "all")        barLabel = `全部 ${trip.places.length} 个地点`
   else if (filter === "pool")  barLabel = `${getPool(trip.places).length} 个待安排地点`
@@ -1803,7 +2397,12 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
 
   return (
     <div className="relative flex-1 h-full overflow-hidden" style={{ background: "#EEEAE2" }}>
+      {hasRealMap && <AMapCanvas places={visiblePlaces} destination={trip.destination} selectedId={selectedId}
+        routeDay={typeof filter === "number" ? filter : undefined}
+        overview={filter === "all"}
+        onSelect={id => { setSelectedId(id); onMarker(id) }} />}
       <svg viewBox="0 0 390 520" className="absolute inset-0 w-full h-full" preserveAspectRatio="xMidYMid slice"
+        style={{ display: hasRealMap ? "none" : "block" }}
         onClick={() => setSelectedId(null)}>
         <defs>
           <style>{`
@@ -1852,7 +2451,9 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
           const dim   = !visible(place)
           const isSel = selectedId === place.id
           const isPool = place.visits.length === 0
-          const scheduledDays = [...new Set(place.visits.map(v => v.day))].sort((a, b) => a - b)
+          const displayVisit = [...place.visits]
+            .filter(visit => typeof filter !== "number" || visit.day === filter)
+            .sort((a, b) => a.day - b.day || a.order - b.order)[0]
           return (
             <g key={place.id} onClick={e => { e.stopPropagation(); setSelectedId(place.id); onMarker(place.id) }}
               style={{ cursor: "pointer", opacity: dim ? 0.18 : 1, transition: "opacity 0.2s" }}>
@@ -1867,11 +2468,11 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
                 </>
               ) : (
                 <>
-                  <circle cx={place.coords.x} cy={place.coords.y} r={13} fill="#F8DF72" stroke="#D4B800" strokeWidth={1.5} />
+                  <circle cx={place.coords.x} cy={place.coords.y} r={14} fill={dayRouteColor(displayVisit?.day || 1)} stroke="#FFFFFF" strokeWidth={2.5} />
                   <text x={place.coords.x} y={place.coords.y} textAnchor="middle" dominantBaseline="central"
-                    fontSize="10" fontWeight="700" fill="#2B2924"
+                    fontSize="10" fontWeight="700" fill="#FFFFFF"
                     style={{ userSelect: "none", fontFamily: "Plus Jakarta Sans, sans-serif" }}>
-                    {scheduledDays.length > 1 ? "·" : scheduledDays[0]}
+                    {displayVisit?.order || ""}
                   </text>
                 </>
               )}
@@ -1886,27 +2487,15 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
         <div className="flex gap-2 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
           {filterOpts.map(f => (
             <button key={String(f.key)} onClick={() => setFilter(f.key)}
-              className={`shrink-0 px-4 h-8 rounded-full text-[12px] font-semibold shadow-md transition-colors ${filter === f.key ? "bg-[#F8DF72] text-[#2B2924]" : "bg-white"}`}
-              style={{ color: filter === f.key ? "#2B2924" : SEC }}>
+              className="shrink-0 px-4 h-8 rounded-full text-[12px] font-semibold transition-all outline-none focus:outline-none"
+              style={{
+                color: "#2B2924",
+                background: typeof f.key === "number" ? dayColor(f.key) : filter === f.key ? "#F8DF72" : "#FFFFFF",
+                boxShadow: filter === f.key ? "0 7px 16px rgba(43,41,36,.24)" : "0 3px 8px rgba(43,41,36,.10)",
+              }}>
               {f.label}
             </button>
           ))}
-        </div>
-      </div>
-
-      {/* Legend */}
-      <div className="absolute top-14 right-4 z-10 bg-white/90 backdrop-blur-sm rounded-xl px-3 py-2 shadow-md border border-[#EEE9DC]">
-        <div className="flex items-center gap-2 mb-1">
-          <div className="w-5 h-5 rounded-full bg-[#F8DF72] border border-[#D4B800] flex items-center justify-center shrink-0">
-            <span style={{ fontSize: "8px", fontWeight: 700, color: "#2B2924" }}>1</span>
-          </div>
-          <span className="text-[10px]" style={{ color: SEC }}>旅行日</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-white border-2 border-[#A9A69F] flex items-center justify-center shrink-0">
-            <div className="w-1.5 h-1.5 rounded-full bg-[#A9A69F]" />
-          </div>
-          <span className="text-[10px]" style={{ color: SEC }}>待安排</span>
         </div>
       </div>
 
@@ -1918,9 +2507,10 @@ function MapTab({ trip, filter, setFilter, listOpen, setListOpen, onMarker, sele
               {visiblePlaces.map(p => (
                 <button key={p.id} onClick={() => { setSelectedId(p.id); setListOpen(false) }}
                   className="w-full flex items-center gap-3 px-4 py-2.5 active:bg-[#FFFCF3] border-b border-[#EEE9DC] last:border-0">
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${p.visits.length ? "bg-[#F8DF72]" : "bg-[#EEE9DC]"}`}>
+                  <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"
+                    style={{ background: p.visits.length ? dayRouteColor((typeof filter === "number" ? p.visits.find(v => v.day === filter) : [...p.visits].sort((a,b) => a.day-b.day || a.order-b.order)[0])?.day || 1) : "#EEE9DC" }}>
                     {p.visits.length
-                      ? <span className="text-[10px] font-bold text-[#2B2924]">{p.visits.length > 1 ? p.visits.length : p.visits[0].day}</span>
+                      ? <span className="text-[10px] font-bold text-white">{(typeof filter === "number" ? p.visits.find(v => v.day === filter) : [...p.visits].sort((a,b) => a.day-b.day || a.order-b.order)[0])?.order || ""}</span>
                       : <div className="w-2 h-2 rounded-full bg-[#A9A69F]" />}
                   </div>
                   <span className="flex-1 text-left text-[13px] text-[#2B2924] truncate">{p.name}</span>
@@ -1971,6 +2561,7 @@ export default function App() {
   const [curTripId,    setCurTripId]    = useState(initialData.curTripId)
   const [profile,      setProfile]      = useState<UserProfile>(initialData.profile)
   const trip = trips.find(t => t.id === curTripId) || trips[0]
+  const exampleHydrationInFlightRef = useRef("")
 
   useEffect(() => {
     savePersistedData({ version: STORAGE_VERSION, trips, trashedTrips, curTripId, profile })
@@ -1987,7 +2578,7 @@ export default function App() {
   const [mapSelectedId, setMapSelectedId] = useState<string | null>(null)
 
   const [editingId,    setEditingId]    = useState<string | null>(null)
-  const [addForm,      setAddForm]      = useState({ name: "", type: "attraction" as PlaceType, note: "", address: "" })
+  const [addForm,      setAddForm]      = useState<PlaceForm>({ name: "", type: "attraction", note: "", address: "" })
   const [createForm,   setCreateForm]   = useState({ name: "", dest: "", dateMode: "pending" as DateMode, days: 7, startDate: "" })
 
   const [dayPicker,    setDayPicker]    = useState({ open: false, placeId: "", visitId: "", selectedDay: null as number | null, mode: "arrange" as DayPickerMode })
@@ -2006,6 +2597,70 @@ export default function App() {
     setToast({ msg, undo })
     toastRef.current = setTimeout(() => setToast(null), 3500)
   }
+
+  // Example places used to contain only layout coordinates for the old mock map.
+  // Resolve missing POI data through AMap so the example remains truthful and its
+  // markers, routes and travel estimates work exactly like user-created places.
+  const missingExampleMapSignature = trip?.id === INIT_TRIP.id
+    ? trip.places
+      .filter(place => !place.amapPoiId || !Number.isFinite(place.lng) || !Number.isFinite(place.lat))
+      .map(place => `${place.id}:${place.name}`)
+      .join("|")
+    : ""
+
+  useEffect(() => {
+    if (!trip || trip.id !== INIT_TRIP.id || !missingExampleMapSignature) return
+    if (!AMAP_KEY || !AMAP_SECURITY_CODE) return
+    if (exampleHydrationInFlightRef.current === missingExampleMapSignature) return
+
+    exampleHydrationInFlightRef.current = missingExampleMapSignature
+    const missingPlaces = trip.places.filter(place =>
+      !place.amapPoiId || !Number.isFinite(place.lng) || !Number.isFinite(place.lat)
+    )
+
+    const normalizeName = (value: string) => value
+      .replace(/[\s·・（）()\-—]/g, "")
+      .replace(/公园|景区|博物院|博物馆|餐厅|烤鸭店|机场/g, "")
+      .toLowerCase()
+
+    void (async () => {
+      const resolved: Array<{ placeId: string; poi: AMapSuggestion }> = []
+      for (const place of missingPlaces) {
+        try {
+          const suggestions = await searchAMapPlaces(place.name, trip.destination)
+          const target = normalizeName(place.name)
+          const poi = suggestions.find(item => {
+            if (!Number.isFinite(item.lng) || !Number.isFinite(item.lat)) return false
+            const candidate = normalizeName(item.name)
+            return candidate === target || candidate.includes(target) || target.includes(candidate)
+          }) || suggestions.find(item => Number.isFinite(item.lng) && Number.isFinite(item.lat))
+          if (poi) resolved.push({ placeId: place.id, poi })
+        } catch {
+          // Keep the example usable when AMap is temporarily unavailable. A later
+          // reload can retry without introducing guessed coordinates.
+        }
+      }
+
+      if (resolved.length === 0) return
+      const poiByPlaceId = new Map(resolved.map(item => [item.placeId, item.poi]))
+      setTrips(current => current.map(item => item.id !== INIT_TRIP.id ? item : {
+        ...item,
+        places: item.places.map(place => {
+          const poi = poiByPlaceId.get(place.id)
+          if (!poi) return place
+          return {
+            ...place,
+            amapPoiId: poi.id || place.amapPoiId,
+            lng: poi.lng,
+            lat: poi.lat,
+            address: poi.address || place.address,
+          }
+        }),
+      }))
+      showToast(`已关联 ${resolved.length} 个示例地点的高德位置`)
+    })()
+
+  }, [missingExampleMapSignature, trip?.id, trip?.destination])
 
   const extMapPlace = trip?.places.find(p => p.id === extMapPlaceId)
 
@@ -2094,16 +2749,54 @@ export default function App() {
     showToast("顺序已更新")
   }
 
-  const savePlace = (form: typeof addForm) => {
+  const savePlace = (form: PlaceForm, target: "pool" | "itinerary", day?: number) => {
+    const { hotelCheckInDay, hotelCheckOutDay, ...placeFields } = form
     if (editingId) {
-      updateTrip(t => ({ ...t, places: t.places.map(p => p.id === editingId ? { ...p, ...form } : p) }))
+      updateTrip(t => ({ ...t, places: t.places.map(p => p.id === editingId ? {
+        ...p, ...placeFields,
+        hotelStay: form.type === "hotel" && hotelCheckInDay && hotelCheckOutDay ? { checkInDay: hotelCheckInDay, checkOutDay: hotelCheckOutDay } : undefined,
+      } : p) }))
       showToast("地点已更新")
+      setScreen("workspace")
     } else {
-      const np: Place = { id: genId(), ...form, dayAssigned: null, order: 0, visits: [], coords: { x: 170 + Math.random() * 50, y: 150 + Math.random() * 50 } }
-      updateTrip(t => ({ ...t, places: [np, ...t.places] }))
-      showToast(`${form.name}已添加到待安排地点`)
+      const targetDay = day || selectedDay
+      const placeId = genId()
+      if (target === "itinerary" && form.type === "hotel") {
+        const checkInDay = Math.max(1, Math.min(trip?.days || 1, hotelCheckInDay || targetDay))
+        const checkOutDay = Math.max(checkInDay, Math.min(trip?.days || 1, hotelCheckOutDay || checkInDay))
+        updateTrip(t => {
+          const startDays = new Set<number>()
+          for (let current = checkInDay + 1; current <= checkOutDay; current += 1) startDays.add(current)
+          const shifted = t.places.map(place => ({
+            ...place,
+            visits: place.visits.map(visit => startDays.has(visit.day) ? { ...visit, order: visit.order + 1 } : visit),
+          }))
+          const visits: Visit[] = []
+          for (let current = checkInDay; current <= checkOutDay; current += 1) {
+            if (current > checkInDay) visits.push({ id: genVisitId(), day: current, order: 1, arrivalTime: "", durationMinutes: null })
+            if (current < checkOutDay || checkInDay === checkOutDay) {
+              const endOrder = getDayPlaces(shifted, current).length + 1
+              visits.push({ id: genVisitId(), day: current, order: endOrder, arrivalTime: "", durationMinutes: null })
+            }
+          }
+          const hotel: Place = { id: placeId, ...placeFields, hotelStay: { checkInDay, checkOutDay }, dayAssigned: null, order: 0, visits, coords: { x: 195, y: 186 } }
+          return { ...t, places: [hotel, ...shifted] }
+        })
+        showToast(`${form.name}已按住宿日期加入行程`)
+        setSelectedDay(checkInDay)
+      } else {
+        const visit: Visit | null = target === "itinerary"
+          ? { id: genVisitId(), day: targetDay, order: getDayPlaces(trip?.places || [], targetDay).length + 1, arrivalTime: "", durationMinutes: null }
+          : null
+        const np: Place = { id: placeId, ...placeFields, dayAssigned: null, order: 0, visits: visit ? [visit] : [], coords: { x: 195, y: 186 } }
+        updateTrip(t => ({ ...t, places: [np, ...t.places] }))
+        showToast(target === "itinerary" ? `${form.name}已添加到第${targetDay}天` : `${form.name}已添加到待安排地点`)
+        if (target === "itinerary") setSelectedDay(targetDay)
+      }
+      setScreen("workspace")
+      setWsTab(target === "itinerary" ? "itinerary" : "pool")
     }
-    setScreen("workspace"); setWsTab("pool"); setEditingId(null)
+    setEditingId(null)
     setAddForm({ name: "", type: "attraction", note: "", address: "" })
   }
 
@@ -2166,7 +2859,12 @@ export default function App() {
   const openEditPlace = (id: string) => {
     const p = trip?.places.find(pl => pl.id === id)
     if (!p) return
-    setEditingId(id); setAddForm({ name: p.name, type: p.type, note: p.note, address: p.address }); setScreen("add-place")
+    setEditingId(id); setAddForm({
+      name: p.name, type: p.type, note: p.note, address: p.address,
+      amapPoiId: p.amapPoiId, lng: p.lng, lat: p.lat,
+      hotelCheckInDay: p.hotelStay?.checkInDay,
+      hotelCheckOutDay: p.hotelStay?.checkOutDay,
+    }); setScreen("add-place")
   }
 
   const activeVisitInfo = placeAct.source === "itinerary" && placeAct.id && trip
@@ -2220,7 +2918,8 @@ export default function App() {
 
         {/* ── Add / Edit Place ──────────────────────────────────── */}
         {screen === "add-place" && (
-          <AddPlaceScreen form={addForm} setForm={setAddForm} editingId={editingId}
+          <AddPlaceScreen form={addForm} setForm={setAddForm} editingId={editingId} destination={trip?.destination || ""} tripDays={trip?.days || 1}
+            tripStartDate={trip?.startDate || ""} tripDateMode={trip?.dateMode || "pending"}
             onBack={() => { setScreen("workspace"); setEditingId(null); setAddForm({ name: "", type: "attraction", note: "", address: "" }) }}
             onSave={savePlace} />
         )}
@@ -2277,7 +2976,12 @@ export default function App() {
                   expandedId={expandedId} setExpandedId={setExpandedId}
                   onAddOptions={() => setAddOpts(true)}
                   onActions={id => setPlaceAct({ open: true, id, source: "itinerary" })}
-                  onReorder={reorderVisit} showToast={showToast} />
+                  onReorder={reorderVisit}
+                  onTravelModeChange={(key, mode) => updateTrip(t => ({
+                    ...t,
+                    segmentTravelModes: { ...(t.segmentTravelModes || {}), [key]: mode },
+                  }))}
+                  showToast={showToast} />
               )}
               {wsTab === "map" && (
                 <MapTab trip={trip} filter={mapFilter} setFilter={setMapFilter}
@@ -2288,6 +2992,8 @@ export default function App() {
               {wsTab === "memo" && (
                 <MemoTab trip={trip}
                   onChange={memos => updateTrip(t => ({ ...t, memos }))}
+                  onFoldersChange={memoFolders => updateTrip(t => ({ ...t, memoFolders }))}
+                  onTrashChange={trashedMemoFolders => updateTrip(t => ({ ...t, trashedMemoFolders }))}
                   showToast={showToast} />
               )}
             </div>
@@ -2476,8 +3182,8 @@ export default function App() {
         {/* ── External Map Dialog ─────────────────────────────────── */}
         {extMapPlace && (
           <>
-            <div className="fixed inset-0 bg-black/40 z-50" onClick={() => setExtMapPlaceId(null)} />
-            <div className="fixed inset-x-5 top-1/2 -translate-y-1/2 bg-white rounded-3xl z-50 p-6 max-w-[370px] mx-auto shadow-2xl">
+            <div className="fixed inset-0 bg-black/40" style={{ zIndex: 1100 }} onClick={() => setExtMapPlaceId(null)} />
+            <div className="fixed inset-x-5 top-1/2 -translate-y-1/2 bg-white rounded-3xl p-6 max-w-[370px] mx-auto shadow-2xl" style={{ zIndex: 1200 }}>
               <h3 className="text-[17px] font-semibold text-[#2B2924] mb-2">即将离开 TripFlow</h3>
               <p className="text-[13px] leading-relaxed mb-1" style={{ color: SEC }}>将在新标签页中搜索「{extMapPlace.name}」。</p>
               <p className="text-[12px] leading-relaxed mb-5" style={{ color: TERC }}>地点结果、路线和导航由外部地图提供，返回后你的 TripFlow 行程不会改变。</p>

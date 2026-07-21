@@ -37,6 +37,9 @@ jobs:
 
       - name: Build
         run: pnpm run build
+        env:
+          VITE_AMAP_KEY: ${{ secrets.VITE_AMAP_KEY }}
+          VITE_AMAP_SECURITY_CODE: ${{ secrets.VITE_AMAP_SECURITY_CODE }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
